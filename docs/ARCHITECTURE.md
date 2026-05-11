@@ -14,7 +14,7 @@ Document Processing is organized around folder-bound task pipelines.
 
 Each task owns one persistent processed state in note frontmatter. Web Clipper cleanup uses `llm: true`; Anki card generation uses `anki: true`. Missing values, `false`, `"false"`, and `null` all mean the note is still eligible for that task's automatic processing.
 
-Automatic failures are not written back to the note. During one plugin session, the queue remembers failed `filePath + taskId + contentHash` combinations so the same unchanged file-task pair is not retried repeatedly. Editing the file changes the hash and makes it eligible again.
+Automatic failures are not written back to the note. Failed jobs are saved to cache for inspection, but automatic eligibility still comes only from the task's frontmatter marker. The queue only deduplicates work that is already queued, not previous failures.
 
 ## Data flow
 
@@ -30,4 +30,4 @@ Automatic failures are not written back to the note. During one plugin session, 
 
 `web-clipper-bilingual-cleanup` cleans Web Clipper and Wikipedia-style Markdown, generates 3 to 8 English kebab-case tags, removes common clipping noise, and writes `llm: true`. It detects the source language before prompting: mostly non-Chinese articles become source-language/Chinese paired Markdown, while mostly Chinese articles stay Chinese and are only cleaned, structured, and tagged.
 
-`anki-card-generation` creates or updates a note's `# Cards` section for the `obsidian_anki_sync` plugin and writes `anki: true`. It uses bundled prompt reference files for Anki Sync syntax, card-writing quality rules, examples, and the JSON output contract. Existing card UUIDs may be preserved, new cards must not invent UUIDs, and non-empty `path:` lines are rejected before writeback. The card language setting is inserted before the task prompt so it has the highest priority.
+`anki-card-generation` creates or updates a note's `# Cards` section for the `obsidian_anki_sync` plugin and writes `anki: true`. It uses bundled prompt reference files for Anki Sync syntax, card-writing quality rules, examples, and the JSON output contract. Existing card UUIDs may be preserved, new cards must not invent UUIDs, and non-empty `path:` lines are sanitized before writeback. The card language setting is inserted before the task prompt so it has the highest priority.

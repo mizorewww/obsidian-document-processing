@@ -51,6 +51,7 @@ export interface OpenAiTextRequest {
 	instructions?: string;
 	maxOutputTokens?: number;
 	onProgress?: LlmProgressCallback;
+	signal?: AbortSignal;
 }
 
 export interface OpenAiTextResponse {
@@ -71,6 +72,7 @@ export class OpenAiRequestError extends Error {
 }
 
 export async function requestOpenAiText(request: OpenAiTextRequest): Promise<OpenAiTextResponse> {
+	throwIfAborted(request.signal);
 	const inputTokens = estimateInputTokens(request.instructions, request.prompt);
 	request.onProgress?.({
 		...buildEstimatedUsage(inputTokens, ""),
@@ -91,6 +93,7 @@ export async function requestOpenAiText(request: OpenAiTextRequest): Promise<Ope
 }
 
 async function requestOpenAiTextBuffered(request: OpenAiTextRequest, inputTokens: number): Promise<OpenAiTextResponse> {
+	throwIfAborted(request.signal);
 	request.onProgress?.({
 		...buildEstimatedUsage(inputTokens, ""),
 		phase: "waiting",
@@ -112,6 +115,7 @@ async function requestOpenAiTextBuffered(request: OpenAiTextRequest, inputTokens
 		}),
 		throw: false,
 	});
+	throwIfAborted(request.signal);
 	const payload = response.json as OpenAiResponsePayload;
 
 	if (response.status < 200 || response.status >= 300) {
@@ -146,6 +150,7 @@ async function requestOpenAiTextStreaming(request: OpenAiTextRequest, inputToken
 				store: false,
 				stream: true,
 			}),
+			signal: request.signal,
 		});
 	} catch (error) {
 		throw new StreamingUnavailableError(error instanceof Error ? error.message : "Streaming request failed.");
@@ -162,6 +167,7 @@ async function requestOpenAiTextStreaming(request: OpenAiTextRequest, inputToken
 	let usage: LlmTokenUsage | undefined;
 
 	await readFetchSseStream(response, (data) => {
+		throwIfAborted(request.signal);
 		if (data === "[DONE]") {
 			return;
 		}
@@ -187,6 +193,7 @@ async function requestOpenAiTextStreaming(request: OpenAiTextRequest, inputToken
 	});
 
 	const text = completedText || streamedText;
+	throwIfAborted(request.signal);
 	const finalUsage = usage ?? buildEstimatedUsage(inputTokens, text);
 	request.onProgress?.(buildProgress("completed", inputTokens, text, finalUsage));
 
@@ -194,6 +201,12 @@ async function requestOpenAiTextStreaming(request: OpenAiTextRequest, inputToken
 		text,
 		usage: finalUsage,
 	};
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+	if (signal?.aborted) {
+		throw new Error("Processing queue canceled.");
+	}
 }
 
 function formatOpenAiError(status: number, payload: OpenAiResponsePayload): string {

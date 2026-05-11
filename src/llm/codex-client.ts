@@ -52,6 +52,7 @@ export interface CodexRequestOptions {
 	serviceTier: CodexServiceTier;
 	instructions?: string;
 	onProgress?: LlmProgressCallback;
+	signal?: AbortSignal;
 }
 
 export interface CodexTextResponse {
@@ -75,6 +76,7 @@ export async function requestCodexText(
 	auth: CodexAuthData,
 	options: CodexRequestOptions,
 ): Promise<CodexTextResponse> {
+	throwIfAborted(options.signal);
 	const inputTokens = estimateInputTokens(options.instructions, prompt);
 	options.onProgress?.({
 		...buildEstimatedUsage(inputTokens, ""),
@@ -101,6 +103,7 @@ async function requestCodexTextBuffered(
 	options: CodexRequestOptions,
 	inputTokens: number,
 ): Promise<CodexTextResponse> {
+	throwIfAborted(options.signal);
 	options.onProgress?.({
 		...buildEstimatedUsage(inputTokens, ""),
 		phase: "waiting",
@@ -121,6 +124,7 @@ async function requestCodexTextBuffered(
 		body: JSON.stringify(buildCodexRequestBody(model, prompt, options)),
 		throw: false,
 	});
+	throwIfAborted(options.signal);
 
 	if (response.status < 200 || response.status >= 300) {
 		throw new CodexRequestError(response.status, formatCodexError(response.status, response.text, response.json as CodexErrorPayload));
@@ -152,6 +156,7 @@ async function requestCodexTextStreaming(
 				version: CODEX_VERSION,
 			},
 			body: JSON.stringify(buildCodexRequestBody(model, prompt, options)),
+			signal: options.signal,
 		});
 	} catch (error) {
 		throw new StreamingUnavailableError(error instanceof Error ? error.message : "Streaming request failed.");
@@ -162,7 +167,7 @@ async function requestCodexTextStreaming(
 		throw new CodexRequestError(response.status, formatCodexError(response.status, text, parseCodexErrorPayload(text)));
 	}
 
-	const result = readCodexStream(response, inputTokens, options.onProgress);
+	const result = readCodexStream(response, inputTokens, options);
 	return result;
 }
 
@@ -225,13 +230,14 @@ function extractCodexSseOutput(
 async function readCodexStream(
 	response: Response,
 	inputTokens: number,
-	onProgress?: LlmProgressCallback,
+	options: CodexRequestOptions,
 ): Promise<CodexTextResponse> {
 	let streamedText = "";
 	let completedText = "";
 	let usage: LlmTokenUsage | undefined;
 
 	await readFetchSseStream(response, (data) => {
+		throwIfAborted(options.signal);
 		if (data === "[DONE]") {
 			return;
 		}
@@ -239,7 +245,7 @@ async function readCodexStream(
 		const payload = JSON.parse(data) as CodexSsePayload;
 		if (typeof payload.delta === "string") {
 			streamedText += payload.delta;
-			onProgress?.(buildProgress("streaming", inputTokens, streamedText));
+			options.onProgress?.(buildProgress("streaming", inputTokens, streamedText));
 		}
 
 		const itemText = extractOutputItemText(payload);
@@ -256,13 +262,20 @@ async function readCodexStream(
 	});
 
 	const text = completedText || streamedText;
+	throwIfAborted(options.signal);
 	const finalUsage = usage ?? buildEstimatedUsage(inputTokens, text);
-	onProgress?.(buildProgress("completed", inputTokens, text, finalUsage));
+	options.onProgress?.(buildProgress("completed", inputTokens, text, finalUsage));
 
 	return {
 		text,
 		usage: finalUsage,
 	};
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+	if (signal?.aborted) {
+		throw new Error("Processing queue canceled.");
+	}
 }
 
 function extractOutputItemText(payload: CodexSsePayload): string {

@@ -61,8 +61,8 @@ test("parses Anki card JSON with new cards and preserved existing UUIDs", () => 
 	assert.deepEqual(extractAnkiCardUuids(result.cardsMarkdown), [existingUuid]);
 });
 
-test("rejects fabricated UUIDs and non-empty paths", () => {
-	assert.throws(() => parseAnkiCardLlmResult(JSON.stringify({
+test("sanitizes fabricated UUIDs and non-empty paths instead of failing", () => {
+	const fabricatedUuidResult = parseAnkiCardLlmResult(JSON.stringify({
 		cardsMarkdown: [
 			"# Cards",
 			"",
@@ -70,9 +70,12 @@ test("rejects fabricated UUIDs and non-empty paths", () => {
 			"{{c1::answer}}",
 			"uuid: 22222222-2222-4222-8222-222222222222",
 		].join("\n"),
-	}), { existingUuids: new Set([existingUuid]) }), /uuid that was not present/u);
+	}), { existingUuids: new Set([existingUuid]) });
 
-	assert.throws(() => parseAnkiCardLlmResult(JSON.stringify({
+	assert.match(fabricatedUuidResult.cardsMarkdown, /^uuid:\s*$/mu);
+	assert.doesNotMatch(fabricatedUuidResult.cardsMarkdown, /22222222/u);
+
+	const pathResult = parseAnkiCardLlmResult(JSON.stringify({
 		cardsMarkdown: [
 			"# Cards",
 			"",
@@ -80,7 +83,10 @@ test("rejects fabricated UUIDs and non-empty paths", () => {
 			"{{c1::answer}}",
 			"path: folder/page.md",
 		].join("\n"),
-	}), { existingUuids: new Set() }), /non-empty path/u);
+	}), { existingUuids: new Set() });
+
+	assert.match(pathResult.cardsMarkdown, /^path:\s*$/mu);
+	assert.doesNotMatch(pathResult.cardsMarkdown, /folder\/page\.md/u);
 });
 
 test("rejects Basic-style cards that contain cloze syntax", () => {

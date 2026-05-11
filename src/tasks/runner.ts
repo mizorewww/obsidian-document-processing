@@ -18,6 +18,7 @@ interface TaskRunnerOptions {
 interface TaskRunOptions {
 	binding?: TaskBinding | null;
 	promptOverride?: string;
+	signal?: AbortSignal;
 }
 
 export class TaskRunner {
@@ -51,6 +52,7 @@ export class TaskRunner {
 		try {
 			job.status = "running";
 			await this.writeManifest(job);
+			throwIfAborted(options.signal);
 
 			const taskInput = this.buildTaskInput(file, originalMarkdown, originalHash);
 			const prompt = options.promptOverride?.trim() || getTaskPrompt(task, options.binding ?? null);
@@ -63,7 +65,9 @@ export class TaskRunner {
 				prompt: preparedRequest.prompt,
 				maxOutputTokens: preparedRequest.maxOutputTokens,
 				onProgress: this.onLlmProgress,
+				signal: options.signal,
 			});
+			throwIfAborted(options.signal);
 			job.provider = llmResponse.provider;
 			job.model = llmResponse.model;
 			job.tokenUsage = llmResponse.usage;
@@ -73,6 +77,7 @@ export class TaskRunner {
 			});
 
 			const taskOutput = task.buildOutput(taskInput, llmResponse.text, stringifyFrontmatter);
+			throwIfAborted(options.signal);
 			await this.writeJson(job, "llm-output.json", {
 				rawText: llmResponse.text,
 				parsedOutput: taskOutput.parsedOutput,
@@ -244,4 +249,10 @@ function createJobId(): string {
 	const timestamp = new Date().toISOString().replace(/[-:.]/gu, "").replace("Z", "");
 	const suffix = Math.random().toString(36).slice(2, 8);
 	return `${timestamp}-${suffix}`;
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+	if (signal?.aborted) {
+		throw new Error("Processing queue canceled.");
+	}
 }

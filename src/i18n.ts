@@ -7,6 +7,7 @@ const ZH = {
 	"command.checkSelectedModel": "检查当前模型",
 	"command.processCurrentClipping": "整理当前剪藏",
 	"command.createUpdateAnkiCards": "为当前笔记制作/更新 Anki 卡片",
+	"command.cancelProcessingQueue": "取消文档处理队列",
 
 	"language.auto": "跟随系统",
 	"language.zhCN": "简体中文",
@@ -146,6 +147,9 @@ const ZH = {
 	"task.auto.failure": "自动处理失败，原文未修改：{path}，{message}",
 	"task.queue.waiting": "等待处理 {count} 个文件",
 	"task.queue.withProgress": "{message}，队列 {count} 个",
+	"task.queue.canceled": "已取消处理队列。",
+	"task.queue.canceledWithCount": "已取消 {count} 个处理任务。",
+	"task.queue.empty": "当前没有等待或正在处理的任务。",
 
 	"section.check": "检查",
 	"check.status.name": "上次结果",
@@ -178,6 +182,7 @@ const EN: Record<TranslationKey, string> = {
 	"command.checkSelectedModel": "Check selected model",
 	"command.processCurrentClipping": "Process current clipping",
 	"command.createUpdateAnkiCards": "Create/update Anki cards for current note",
+	"command.cancelProcessingQueue": "Cancel document processing queue",
 
 	"language.auto": "Follow system",
 	"language.zhCN": "Simplified Chinese",
@@ -317,6 +322,9 @@ const EN: Record<TranslationKey, string> = {
 	"task.auto.failure": "Auto processing failed. Original note was not modified: {path}, {message}",
 	"task.queue.waiting": "{count} files waiting",
 	"task.queue.withProgress": "{message}, {count} queued",
+	"task.queue.canceled": "Processing queue canceled.",
+	"task.queue.canceledWithCount": "Canceled {count} processing tasks.",
+	"task.queue.empty": "No processing task is waiting or running.",
 
 	"section.check": "Check",
 	"check.status.name": "Last result",

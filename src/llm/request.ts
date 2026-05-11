@@ -14,6 +14,7 @@ export interface LlmTextRequest {
 	prompt: string;
 	maxOutputTokens?: number;
 	onProgress?: LlmProgressCallback;
+	signal?: AbortSignal;
 }
 
 export interface LlmTextResponse {
@@ -50,6 +51,7 @@ async function requestOpenAiApiText(request: LlmTextRequest): Promise<LlmTextRes
 		prompt: request.prompt,
 		maxOutputTokens: request.maxOutputTokens,
 		onProgress: request.onProgress,
+		signal: request.signal,
 	});
 
 	return {
@@ -73,6 +75,7 @@ async function requestCodexLoginText(request: LlmTextRequest): Promise<LlmTextRe
 		reasoningEffort: request.settings.codexReasoningEffort,
 		serviceTier: request.settings.codexServiceTier,
 		onProgress: request.onProgress,
+		signal: request.signal,
 	};
 
 	try {

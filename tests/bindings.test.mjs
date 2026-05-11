@@ -17,6 +17,7 @@ const {
 const {
 	AutoProcessor,
 	AutoProcessDedupeTracker,
+	ProcessingCanceledError,
 } = await jiti.import("../src/tasks/auto-processor.ts");
 const {
 	WEB_CLIPPER_BILINGUAL_CLEANUP_TASK,
@@ -79,7 +80,7 @@ test("uses binding prompt override before task default", () => {
 	}), "Custom prompt");
 });
 
-test("deduplicates queued and failed auto processing keys", () => {
+test("deduplicates only currently queued auto processing keys", () => {
 	const tracker = new AutoProcessDedupeTracker();
 	const key = createQueueKey("Learning/Clippings/Article.md", "hash-a", "web-clipper-bilingual-cleanup");
 
@@ -88,8 +89,6 @@ test("deduplicates queued and failed auto processing keys", () => {
 	assert.equal(tracker.canQueue(key), false);
 	tracker.markDequeued(key);
 	assert.equal(tracker.canQueue(key), true);
-	tracker.markFailed(key);
-	assert.equal(tracker.canQueue(key), false);
 });
 
 test("queue keys are separate per task for the same file hash", () => {
@@ -131,6 +130,39 @@ test("auto scanning can enqueue one candidate per matching task", async () => {
 	});
 
 	assert.deepEqual(candidates.map((candidate) => candidate.binding.id), ["clippings", "anki"]);
+});
+
+test("queue cancellation rejects pending work", async () => {
+	const processor = new AutoProcessor({
+		app: {
+			vault: {
+				cachedRead: async () => "# Note\n",
+			},
+		},
+		getSettings: () => ({
+			taskBindings: [],
+		}),
+		getTaskDefinition: () => ({
+			processedFrontmatterKey: "llm",
+		}),
+		runTask: async (_file, _binding, _source, _pendingCount, _taskId, signal) => {
+			await new Promise((_, reject) => {
+				signal.addEventListener("abort", () => reject(new ProcessingCanceledError()), { once: true });
+			});
+		},
+		onQueueChange: () => undefined,
+		onAutoFailure: () => undefined,
+	});
+	const file = {
+		path: "Learning/Clippings/New.md",
+		extension: "md",
+	};
+	const first = processor.enqueueManual(file, binding);
+	const second = processor.enqueueManual(file, binding);
+
+	assert.equal(processor.cancelAll(), 2);
+	await assert.rejects(first, ProcessingCanceledError);
+	await assert.rejects(second, ProcessingCanceledError);
 });
 
 test("startup scanning candidates are unprocessed markdown files in bound folders", () => {

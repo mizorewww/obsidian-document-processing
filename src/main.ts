@@ -7,7 +7,7 @@ import { getTaskDefinition } from "./tasks";
 import { DEFAULT_PROCESSING_TASK_ID, ProcessingTaskId } from "./tasks/task-ids";
 import { TaskRunner } from "./tasks/runner";
 import { LlmProgressUpdate, LlmTokenUsage } from "./llm/token-usage";
-import { AutoProcessor, AutoQueueState, TaskRunSource } from "./tasks/auto-processor";
+import { AutoProcessor, AutoQueueState, ProcessingCanceledError, TaskRunSource } from "./tasks/auto-processor";
 import { findTaskBindingForFile, TaskBinding } from "./tasks/bindings";
 import { ProcessingResult } from "./tasks/types";
 import { ANKI_CARD_GENERATION_TASK_ID } from "./tasks/anki-card-utils";
@@ -27,7 +27,7 @@ export default class DocumentProcessingPlugin extends Plugin {
 			app: this.app,
 			getSettings: () => this.settings,
 			getTaskDefinition,
-			runTask: (file, binding, source, pendingCount, taskId) => this.runTaskFile(file, binding, source, pendingCount, taskId),
+			runTask: (file, binding, source, pendingCount, taskId, signal) => this.runTaskFile(file, binding, source, pendingCount, taskId, signal),
 			onQueueChange: (state) => this.handleAutoQueueChange(state),
 			onAutoFailure: (file, error) => this.handleAutoFailure(file, error),
 		});
@@ -35,14 +35,8 @@ export default class DocumentProcessingPlugin extends Plugin {
 		this.addCommand({
 			id: "check-llm-connection",
 			name: translate(this.settings.language, "command.checkSelectedModel"),
-			callback: async () => {
-				try {
-					const result = await checkLlmConnection(this.settings, () => this.saveSettings());
-					new Notice(result.message);
-				} catch (error) {
-					const message = error instanceof Error ? error.message : translate(this.settings.language, "check.failed");
-					new Notice(message);
-				}
+			callback: () => {
+				void this.checkSelectedModel();
 			},
 		});
 
@@ -80,6 +74,14 @@ export default class DocumentProcessingPlugin extends Plugin {
 			},
 		});
 
+		this.addCommand({
+			id: "cancel-processing-queue",
+			name: translate(this.settings.language, "command.cancelProcessingQueue"),
+			callback: () => this.cancelProcessingQueue(),
+		});
+
+		this.addRibbonActions();
+
 		this.registerEvent(this.app.vault.on("create", (file) => {
 			void this.autoProcessor?.handleCreate(file);
 		}));
@@ -104,6 +106,47 @@ export default class DocumentProcessingPlugin extends Plugin {
 		await this.saveData(this.settings);
 	}
 
+	private addRibbonActions(): void {
+		this.addRibbonIcon("badge-check", translate(this.settings.language, "command.checkSelectedModel"), () => {
+			void this.checkSelectedModel();
+		});
+		this.addRibbonIcon("wand-sparkles", translate(this.settings.language, "command.processCurrentClipping"), () => {
+			const file = this.getActiveMarkdownFile();
+			if (file) {
+				void this.processCurrentClipping(file);
+			}
+		});
+		this.addRibbonIcon("layers", translate(this.settings.language, "command.createUpdateAnkiCards"), () => {
+			const file = this.getActiveMarkdownFile();
+			if (file) {
+				void this.processCurrentAnkiCards(file);
+			}
+		});
+		this.addRibbonIcon("circle-stop", translate(this.settings.language, "command.cancelProcessingQueue"), () => {
+			this.cancelProcessingQueue();
+		});
+	}
+
+	private async checkSelectedModel(): Promise<void> {
+		try {
+			const result = await checkLlmConnection(this.settings, () => this.saveSettings());
+			new Notice(result.message);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : translate(this.settings.language, "check.failed");
+			new Notice(message);
+		}
+	}
+
+	private getActiveMarkdownFile(): TFile | null {
+		const file = this.app.workspace.getActiveFile();
+		if (!this.isMarkdownFile(file)) {
+			new Notice(translate(this.settings.language, "task.process.noActiveMarkdown"));
+			return null;
+		}
+
+		return file;
+	}
+
 	private async processCurrentClipping(file: TFile): Promise<void> {
 		if (!this.autoProcessor) {
 			return;
@@ -123,6 +166,11 @@ export default class DocumentProcessingPlugin extends Plugin {
 			}
 		} catch (error) {
 			this.hideProcessingProgress();
+			if (isProcessingCanceled(error)) {
+				new Notice(translate(this.settings.language, "task.queue.canceled"));
+				return;
+			}
+
 			const message = error instanceof Error ? error.message : String(error);
 			new Notice(translate(this.settings.language, "task.process.failure", { message }));
 		}
@@ -147,6 +195,11 @@ export default class DocumentProcessingPlugin extends Plugin {
 			}
 		} catch (error) {
 			this.hideProcessingProgress();
+			if (isProcessingCanceled(error)) {
+				new Notice(translate(this.settings.language, "task.queue.canceled"));
+				return;
+			}
+
 			const message = error instanceof Error ? error.message : String(error);
 			new Notice(translate(this.settings.language, "task.process.failure", { message }));
 		}
@@ -158,6 +211,7 @@ export default class DocumentProcessingPlugin extends Plugin {
 		source: TaskRunSource,
 		pendingCount: number,
 		taskId?: ProcessingTaskId,
+		signal?: AbortSignal,
 	): Promise<ProcessingResult> {
 		let latestUsage: LlmTokenUsage | undefined;
 		this.activeQueuePending = pendingCount;
@@ -175,7 +229,7 @@ export default class DocumentProcessingPlugin extends Plugin {
 					this.updateProcessingProgress(progress);
 				},
 			});
-			const result = await runner.run(task, file, { binding });
+			const result = await runner.run(task, file, { binding, signal });
 			return {
 				...result,
 				tokenUsage: result.tokenUsage ?? latestUsage,
@@ -246,11 +300,23 @@ export default class DocumentProcessingPlugin extends Plugin {
 	}
 
 	private handleAutoFailure(file: TFile, error: unknown): void {
+		if (isProcessingCanceled(error)) {
+			return;
+		}
+
 		const message = error instanceof Error ? error.message : String(error);
 		new Notice(translate(this.settings.language, "task.auto.failure", {
 			path: file.path,
 			message,
 		}));
+	}
+
+	private cancelProcessingQueue(): void {
+		const canceledCount = this.autoProcessor?.cancelAll() ?? 0;
+		this.hideProcessingProgress();
+		new Notice(canceledCount > 0
+			? translate(this.settings.language, "task.queue.canceledWithCount", { count: canceledCount })
+			: translate(this.settings.language, "task.queue.empty"));
 	}
 
 	private addQueueToMessage(message: string): string {
@@ -283,4 +349,10 @@ export default class DocumentProcessingPlugin extends Plugin {
 
 		return `${prefix}${tokens}`;
 	}
+}
+
+function isProcessingCanceled(error: unknown): boolean {
+	return error instanceof ProcessingCanceledError
+		|| error instanceof DOMException && error.name === "AbortError"
+		|| error instanceof Error && /canceled|cancelled|aborted/iu.test(error.message);
 }

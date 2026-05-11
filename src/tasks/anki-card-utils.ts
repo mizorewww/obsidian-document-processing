@@ -111,10 +111,11 @@ export function parseAnkiCardLlmResult(rawText: string, options: ParseAnkiCardLl
 	}
 
 	const cardsMarkdown = normalizeCardsMarkdown(payload.cardsMarkdown);
-	validateCardsMarkdown(cardsMarkdown, options.existingUuids);
+	const sanitizedCardsMarkdown = sanitizeIdentityLines(cardsMarkdown, options.existingUuids);
+	validateCardsMarkdown(sanitizedCardsMarkdown, options.existingUuids);
 
 	return {
-		cardsMarkdown,
+		cardsMarkdown: sanitizedCardsMarkdown,
 		changeSummary: normalizeChangeSummary(payload.changeSummary),
 	};
 }
@@ -230,6 +231,36 @@ function validateIdentityLines(blocks: string[], existingUuids: Set<string>): vo
 			outputUuids.add(uuid);
 		}
 	}
+}
+
+function sanitizeIdentityLines(cardsMarkdown: string, existingUuids: Set<string>): string {
+	const outputUuids = new Set<string>();
+
+	return cardsMarkdown.split("\n").map((line) => {
+		const metadata = line.match(METADATA_LINE_PATTERN);
+		if (!metadata) {
+			return line;
+		}
+
+		const key = (metadata[1] ?? "").toLowerCase();
+		const value = (metadata[2] ?? "").trim();
+
+		if (key === "path") {
+			return "path:";
+		}
+
+		if (key !== "uuid") {
+			return line;
+		}
+
+		const uuid = value.toLowerCase();
+		if (!uuid || !UUID_PATTERN.test(uuid) || !existingUuids.has(uuid) || outputUuids.has(uuid)) {
+			return "uuid:";
+		}
+
+		outputUuids.add(uuid);
+		return `uuid: ${uuid}`;
+	}).join("\n");
 }
 
 function validateCardTypes(blocks: string[]): void {

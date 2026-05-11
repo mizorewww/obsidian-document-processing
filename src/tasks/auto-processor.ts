@@ -23,7 +23,7 @@ interface AutoProcessorOptions {
 	app: App;
 	getSettings: () => DocumentProcessingSettings;
 	getTaskDefinition: (taskId: ProcessingTaskId) => Pick<TaskDefinition, "processedFrontmatterKey">;
-	runTask: (file: TFile, binding: TaskBinding | null, source: TaskRunSource, pendingCount: number, taskId?: ProcessingTaskId) => Promise<ProcessingResult>;
+	runTask: (file: TFile, binding: TaskBinding | null, source: TaskRunSource, pendingCount: number, taskId?: ProcessingTaskId, signal?: AbortSignal) => Promise<ProcessingResult>;
 	onQueueChange: (state: AutoQueueState) => void;
 	onAutoFailure: (file: TFile, error: unknown) => void;
 }
@@ -33,6 +33,7 @@ interface QueueItem {
 	binding: TaskBinding | null;
 	source: TaskRunSource;
 	key: string;
+	abortController: AbortController;
 	taskId?: ProcessingTaskId;
 	resolve?: (result: ProcessingResult) => void;
 	reject?: (error: unknown) => void;
@@ -45,10 +46,9 @@ interface Candidate {
 
 export class AutoProcessDedupeTracker {
 	private queuedKeys = new Set<string>();
-	private failedKeys = new Set<string>();
 
 	canQueue(key: string): boolean {
-		return !this.queuedKeys.has(key) && !this.failedKeys.has(key);
+		return !this.queuedKeys.has(key);
 	}
 
 	markQueued(key: string): void {
@@ -58,9 +58,12 @@ export class AutoProcessDedupeTracker {
 	markDequeued(key: string): void {
 		this.queuedKeys.delete(key);
 	}
+}
 
-	markFailed(key: string): void {
-		this.failedKeys.add(key);
+export class ProcessingCanceledError extends Error {
+	constructor(message = "Processing queue canceled.") {
+		super(message);
+		this.name = "ProcessingCanceledError";
 	}
 }
 
@@ -75,6 +78,7 @@ export class AutoProcessor {
 	private dedupe = new AutoProcessDedupeTracker();
 	private processing = false;
 	private activeFilePath: string | null = null;
+	private activeAbortController: AbortController | null = null;
 	private modifyTimers = new Map<string, number>();
 
 	constructor(options: AutoProcessorOptions) {
@@ -125,12 +129,14 @@ export class AutoProcessor {
 		return new Promise((resolve, reject) => {
 			const manualTaskId = taskId ?? binding?.taskId;
 			const key = `manual:${file.path}:${manualTaskId ?? "default"}:${Date.now().toString(36)}:${Math.random().toString(36).slice(2, 8)}`;
+			const abortController = new AbortController();
 			this.queue.push({
 				file,
 				binding,
 				source: "manual",
 				key,
 				taskId,
+				abortController,
 				resolve,
 				reject,
 			});
@@ -157,6 +163,7 @@ export class AutoProcessor {
 				binding: candidate.binding,
 				source: "auto",
 				key,
+				abortController: new AbortController(),
 			});
 			this.dedupe.markQueued(key);
 		}
@@ -206,31 +213,62 @@ export class AutoProcessor {
 
 				this.dedupe.markDequeued(item.key);
 				this.activeFilePath = item.file.path;
+				this.activeAbortController = item.abortController;
 				this.notifyQueueChange();
 
 				try {
+					if (item.abortController.signal.aborted) {
+						throw new ProcessingCanceledError();
+					}
+
 					if (item.source === "auto" && !await this.isStillAutoCandidate(item)) {
 						continue;
 					}
 
-					const result = await this.runTask(item.file, item.binding, item.source, this.queue.length, item.taskId);
+					const result = await this.runTask(item.file, item.binding, item.source, this.queue.length, item.taskId, item.abortController.signal);
 					item.resolve?.(result);
 				} catch (error) {
 					if (item.source === "auto") {
-						this.dedupe.markFailed(item.key);
 						this.onAutoFailure(item.file, error);
 					}
 					item.reject?.(error);
 				} finally {
 					this.activeFilePath = null;
+					this.activeAbortController = null;
 					this.notifyQueueChange();
 				}
 			}
 		} finally {
 			this.processing = false;
 			this.activeFilePath = null;
+			this.activeAbortController = null;
 			this.notifyQueueChange();
 		}
+	}
+
+	cancelAll(): number {
+		let canceledCount = 0;
+		const error = new ProcessingCanceledError();
+
+		for (const timer of this.modifyTimers.values()) {
+			window.clearTimeout(timer);
+		}
+		this.modifyTimers.clear();
+
+		for (const item of this.queue.splice(0)) {
+			item.abortController.abort();
+			this.dedupe.markDequeued(item.key);
+			item.reject?.(error);
+			canceledCount += 1;
+		}
+
+		if (this.activeAbortController && !this.activeAbortController.signal.aborted) {
+			this.activeAbortController.abort();
+			canceledCount += 1;
+		}
+
+		this.notifyQueueChange();
+		return canceledCount;
 	}
 
 	private async isStillAutoCandidate(item: QueueItem): Promise<boolean> {
