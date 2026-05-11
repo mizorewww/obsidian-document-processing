@@ -25,3 +25,21 @@
 	font-size: var(--font-ui-smaller);
 	margin-top: 4px;
 }
+
+.document-processing-binding {
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-s);
+	margin: 8px 0 12px;
+	padding: 8px 12px;
+}
+
+.document-processing-task {
+	margin: 12px 0 16px;
+}
+
+.document-processing-prompt-editor {
+	font-family: var(--font-monospace);
+	min-height: 55vh;
+	resize: vertical;
+	width: 100%;
+}

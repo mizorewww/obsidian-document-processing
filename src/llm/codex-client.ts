@@ -2,6 +2,16 @@ import { requestUrl } from "obsidian";
 import { CodexAuthData } from "../settings-data";
 import { CodexReasoningEffort, CodexServiceTier } from "./models";
 import { CODEX_ORIGINATOR, CODEX_RESPONSES_URL, CODEX_VERSION, getCodexUserAgent } from "./codex-auth";
+import { canUseFetchStreaming, readFetchSseStream, StreamingUnavailableError } from "./sse";
+import {
+	ApiUsagePayload,
+	buildEstimatedUsage,
+	buildProgress,
+	estimateInputTokens,
+	LlmProgressCallback,
+	LlmTokenUsage,
+	usageFromApi,
+} from "./token-usage";
 
 interface OpenAiResponsePayload {
 	output_text?: string;
@@ -12,6 +22,7 @@ interface OpenAiResponsePayload {
 		}>;
 		type?: string;
 	}>;
+	usage?: ApiUsagePayload;
 }
 
 interface CodexErrorPayload {
@@ -26,6 +37,7 @@ interface CodexErrorPayload {
 interface CodexSsePayload {
 	type?: string;
 	delta?: string;
+	usage?: ApiUsagePayload;
 	item?: {
 		content?: Array<{
 			text?: string;
@@ -38,6 +50,13 @@ interface CodexSsePayload {
 export interface CodexRequestOptions {
 	reasoningEffort: CodexReasoningEffort;
 	serviceTier: CodexServiceTier;
+	instructions?: string;
+	onProgress?: LlmProgressCallback;
+}
+
+export interface CodexTextResponse {
+	text: string;
+	usage: LlmTokenUsage;
 }
 
 export class CodexRequestError extends Error {
@@ -55,7 +74,38 @@ export async function requestCodexText(
 	prompt: string,
 	auth: CodexAuthData,
 	options: CodexRequestOptions,
-): Promise<string> {
+): Promise<CodexTextResponse> {
+	const inputTokens = estimateInputTokens(options.instructions, prompt);
+	options.onProgress?.({
+		...buildEstimatedUsage(inputTokens, ""),
+		phase: "uploading",
+	});
+
+	if (options.onProgress && canUseFetchStreaming()) {
+		try {
+			return await requestCodexTextStreaming(model, prompt, auth, options, inputTokens);
+		} catch (error) {
+			if (!(error instanceof StreamingUnavailableError)) {
+				throw error;
+			}
+		}
+	}
+
+	return requestCodexTextBuffered(model, prompt, auth, options, inputTokens);
+}
+
+async function requestCodexTextBuffered(
+	model: string,
+	prompt: string,
+	auth: CodexAuthData,
+	options: CodexRequestOptions,
+	inputTokens: number,
+): Promise<CodexTextResponse> {
+	options.onProgress?.({
+		...buildEstimatedUsage(inputTokens, ""),
+		phase: "waiting",
+	});
+
 	const response = await requestUrl({
 		url: CODEX_RESPONSES_URL,
 		method: "POST",
@@ -68,32 +118,7 @@ export async function requestCodexText(
 			originator: CODEX_ORIGINATOR,
 			version: CODEX_VERSION,
 		},
-		body: JSON.stringify({
-			model,
-			instructions: "You are a concise assistant.",
-			input: [
-				{
-					role: "user",
-					content: [
-						{
-							type: "input_text",
-							text: prompt,
-						},
-					],
-				},
-			],
-			tools: [],
-			tool_choice: "auto",
-			parallel_tool_calls: false,
-			reasoning: {
-				effort: options.reasoningEffort,
-				summary: "auto",
-			},
-			include: ["reasoning.encrypted_content"],
-			store: false,
-			service_tier: options.serviceTier === "default" ? undefined : options.serviceTier,
-			stream: true,
-		}),
+		body: JSON.stringify(buildCodexRequestBody(model, prompt, options)),
 		throw: false,
 	});
 
@@ -101,7 +126,44 @@ export async function requestCodexText(
 		throw new CodexRequestError(response.status, formatCodexError(response.status, response.text, response.json as CodexErrorPayload));
 	}
 
-	return extractCodexSseOutputText(response.text);
+	const result = extractCodexSseOutput(response.text, inputTokens, options.onProgress);
+	options.onProgress?.(buildProgress("completed", inputTokens, result.text, result.usage));
+	return result;
+}
+
+async function requestCodexTextStreaming(
+	model: string,
+	prompt: string,
+	auth: CodexAuthData,
+	options: CodexRequestOptions,
+	inputTokens: number,
+): Promise<CodexTextResponse> {
+	let response: Response;
+	try {
+		response = await globalThis.fetch(CODEX_RESPONSES_URL, {
+			method: "POST",
+			headers: {
+				Accept: "text/event-stream",
+				Authorization: `Bearer ${auth.accessToken}`,
+				"ChatGPT-Account-ID": auth.accountId,
+				"Content-Type": "application/json",
+				"User-Agent": getCodexUserAgent(),
+				originator: CODEX_ORIGINATOR,
+				version: CODEX_VERSION,
+			},
+			body: JSON.stringify(buildCodexRequestBody(model, prompt, options)),
+		});
+	} catch (error) {
+		throw new StreamingUnavailableError(error instanceof Error ? error.message : "Streaming request failed.");
+	}
+
+	if (!response.ok) {
+		const text = await response.text();
+		throw new CodexRequestError(response.status, formatCodexError(response.status, text, parseCodexErrorPayload(text)));
+	}
+
+	const result = readCodexStream(response, inputTokens, options.onProgress);
+	return result;
 }
 
 function formatCodexError(status: number, text: string, payload: CodexErrorPayload): string {
@@ -109,10 +171,15 @@ function formatCodexError(status: number, text: string, payload: CodexErrorPaylo
 	return `Codex request failed with HTTP ${status}: ${message}`;
 }
 
-function extractCodexSseOutputText(text: string): string {
+function extractCodexSseOutput(
+	text: string,
+	inputTokens: number,
+	onProgress?: LlmProgressCallback,
+): CodexTextResponse {
 	const completedItems: string[] = [];
 	const deltas: string[] = [];
 	const events = text.split(/\n\n+/);
+	let usage: LlmTokenUsage | undefined;
 
 	for (const event of events) {
 		const data = event
@@ -129,6 +196,7 @@ function extractCodexSseOutputText(text: string): string {
 			const payload = JSON.parse(data) as CodexSsePayload;
 			if (typeof payload.delta === "string") {
 				deltas.push(payload.delta);
+				onProgress?.(buildProgress("streaming", inputTokens, deltas.join("")));
 			}
 
 			const itemText = extractOutputItemText(payload);
@@ -140,12 +208,61 @@ function extractCodexSseOutputText(text: string): string {
 			if (responseText) {
 				completedItems.push(responseText);
 			}
+
+			usage = usageFromApi(payload.response?.usage ?? payload.usage) ?? usage;
 		} catch {
 			// Ignore malformed event frames and keep scanning the completed stream.
 		}
 	}
 
-	return completedItems[completedItems.length - 1] ?? deltas.join("");
+	const outputText = completedItems[completedItems.length - 1] ?? deltas.join("");
+	return {
+		text: outputText,
+		usage: usage ?? buildEstimatedUsage(inputTokens, outputText),
+	};
+}
+
+async function readCodexStream(
+	response: Response,
+	inputTokens: number,
+	onProgress?: LlmProgressCallback,
+): Promise<CodexTextResponse> {
+	let streamedText = "";
+	let completedText = "";
+	let usage: LlmTokenUsage | undefined;
+
+	await readFetchSseStream(response, (data) => {
+		if (data === "[DONE]") {
+			return;
+		}
+
+		const payload = JSON.parse(data) as CodexSsePayload;
+		if (typeof payload.delta === "string") {
+			streamedText += payload.delta;
+			onProgress?.(buildProgress("streaming", inputTokens, streamedText));
+		}
+
+		const itemText = extractOutputItemText(payload);
+		if (itemText) {
+			completedText = itemText;
+		}
+
+		const responseText = payload.response ? extractOpenAiOutputText(payload.response) : "";
+		if (responseText) {
+			completedText = responseText;
+		}
+
+		usage = usageFromApi(payload.response?.usage ?? payload.usage) ?? usage;
+	});
+
+	const text = completedText || streamedText;
+	const finalUsage = usage ?? buildEstimatedUsage(inputTokens, text);
+	onProgress?.(buildProgress("completed", inputTokens, text, finalUsage));
+
+	return {
+		text,
+		usage: finalUsage,
+	};
 }
 
 function extractOutputItemText(payload: CodexSsePayload): string {
@@ -175,4 +292,42 @@ function extractOpenAiOutputText(payload: OpenAiResponsePayload): string {
 	}
 
 	return outputParts.join("\n");
+}
+
+function buildCodexRequestBody(model: string, prompt: string, options: CodexRequestOptions): Record<string, unknown> {
+	return {
+		model,
+		instructions: options.instructions ?? "You are a concise assistant.",
+		input: [
+			{
+				role: "user",
+				content: [
+					{
+						type: "input_text",
+						text: prompt,
+					},
+				],
+			},
+		],
+		tools: [],
+		tool_choice: "auto",
+		parallel_tool_calls: false,
+		reasoning: {
+			effort: options.reasoningEffort,
+			summary: "auto",
+		},
+		include: ["reasoning.encrypted_content"],
+		store: false,
+		service_tier: options.serviceTier === "default" ? undefined : options.serviceTier,
+		stream: true,
+	};
+}
+
+function parseCodexErrorPayload(text: string): CodexErrorPayload {
+	try {
+		const parsed = JSON.parse(text) as CodexErrorPayload;
+		return parsed && typeof parsed === "object" ? parsed : {};
+	} catch {
+		return {};
+	}
 }

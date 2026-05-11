@@ -1,4 +1,4 @@
-import { App, Notice, PluginSettingTab, Setting } from "obsidian";
+import { App, Modal, Notice, PluginSettingTab, Setting } from "obsidian";
 import type DocumentProcessingPlugin from "./main";
 import { translate, LanguageSetting, resolveLanguage } from "./i18n";
 import { checkLlmConnection } from "./llm/check";
@@ -19,10 +19,21 @@ import {
 	ModelOption,
 	OPENAI_API_MODELS,
 } from "./llm/models";
-import { CodexAuthData, LlmConnectionCheckRecord, LlmProvider } from "./settings-data";
+import { AnkiCardLanguage, CodexAuthData, LlmConnectionCheckRecord, LlmProvider } from "./settings-data";
+import { TASK_DEFINITIONS } from "./tasks";
+import { ANKI_CARD_GENERATION_TASK_ID } from "./tasks/anki-card-utils";
+import {
+	createTaskBindingId,
+	DEFAULT_TASK_BINDING_FOLDER,
+	getTaskPrompt,
+	normalizeVaultFolderPath,
+	TaskBinding,
+} from "./tasks/bindings";
+import { TaskDefinition } from "./tasks/types";
 
 const LANGUAGE_SETTINGS: LanguageSetting[] = ["auto", "zh-CN", "en"];
 const PROVIDERS: LlmProvider[] = ["openai-api", "codex-login"];
+const ANKI_CARD_LANGUAGES: AnkiCardLanguage[] = ["zh-CN", "en", "match-note"];
 
 export class DocumentProcessingSettingTab extends PluginSettingTab {
 	plugin: DocumentProcessingPlugin;
@@ -40,6 +51,7 @@ export class DocumentProcessingSettingTab extends PluginSettingTab {
 		this.addGeneralSection(containerEl);
 		this.addAccountSection(containerEl);
 		this.addModelSection(containerEl);
+		this.addProcessingSection(containerEl);
 		this.addCheckSection(containerEl);
 	}
 
@@ -300,6 +312,177 @@ export class DocumentProcessingSettingTab extends PluginSettingTab {
 			});
 	}
 
+	private addProcessingSection(containerEl: HTMLElement): void {
+		const sectionEl = this.addSection(containerEl, this.t("section.processing"));
+
+		for (const task of TASK_DEFINITIONS) {
+			this.addTaskSection(sectionEl, task);
+		}
+
+		new Setting(sectionEl)
+			.setName(this.t("processing.cacheRetention.name"))
+			.setDesc(this.t("processing.cacheRetention.desc"))
+			.addText((text) => {
+				text.inputEl.type = "number";
+				text.inputEl.min = "1";
+				text.inputEl.step = "1";
+				text
+					.setPlaceholder(this.t("processing.cacheRetention.placeholder"))
+					.setValue(String(this.plugin.settings.cacheRetentionLimit))
+					.onChange(async (value) => {
+						const parsed = Number(value);
+						if (!Number.isFinite(parsed) || parsed < 1) {
+							return;
+						}
+
+						this.plugin.settings.cacheRetentionLimit = Math.round(parsed);
+						await this.plugin.saveSettings();
+					});
+			});
+
+		new Setting(sectionEl)
+			.setName(this.t("processing.showCompletionNotice.name"))
+			.setDesc(this.t("processing.showCompletionNotice.desc"))
+			.addToggle((toggle) => toggle
+				.setValue(this.plugin.settings.showCompletionNotice)
+				.onChange(async (value) => {
+					this.plugin.settings.showCompletionNotice = value;
+					await this.plugin.saveSettings();
+				}));
+	}
+
+	private addTaskSection(containerEl: HTMLElement, task: TaskDefinition): void {
+		const taskEl = containerEl.createDiv({ cls: "document-processing-task" });
+		const bindings = this.plugin.settings.taskBindings.filter((binding) => binding.taskId === task.id);
+
+		new Setting(taskEl)
+			.setName(this.getTaskLabel(task.id))
+			.setDesc(this.t("processing.task.desc", { count: bindings.length }))
+			.setHeading()
+			.addButton((button) => button
+				.setButtonText(this.t("processing.binding.add"))
+				.setIcon("plus")
+				.onClick(async () => {
+					this.plugin.settings.taskBindings.push({
+						id: createTaskBindingId(this.plugin.settings.taskBindings.length),
+						autoProcess: false,
+						folderPath: DEFAULT_TASK_BINDING_FOLDER,
+						taskId: task.id,
+						recursive: true,
+						promptOverride: "",
+					});
+					await this.plugin.saveSettings();
+					this.display();
+				}));
+
+		if (task.id === ANKI_CARD_GENERATION_TASK_ID) {
+			this.addAnkiCardLanguageSetting(taskEl);
+		}
+
+		for (const binding of bindings) {
+			this.addTaskBinding(taskEl, task, binding);
+		}
+	}
+
+	private addAnkiCardLanguageSetting(containerEl: HTMLElement): void {
+		new Setting(containerEl)
+			.setName(this.t("processing.anki.language.name"))
+			.setDesc(this.t("processing.anki.language.desc"))
+			.addDropdown((dropdown) => {
+				for (const language of ANKI_CARD_LANGUAGES) {
+					dropdown.addOption(language, this.getAnkiCardLanguageLabel(language));
+				}
+
+				dropdown
+					.setValue(this.plugin.settings.ankiCardLanguage)
+					.onChange(async (value) => {
+						this.plugin.settings.ankiCardLanguage = value as AnkiCardLanguage;
+						await this.plugin.saveSettings();
+					});
+			});
+	}
+
+	private addTaskBinding(containerEl: HTMLElement, task: TaskDefinition, binding: TaskBinding): void {
+		const folderPath = normalizeVaultFolderPath(binding.folderPath);
+		const missingFolder = folderPath && !this.app.vault.getFolderByPath(folderPath);
+		const bindingEl = containerEl.createDiv({ cls: "document-processing-binding" });
+
+		new Setting(bindingEl)
+			.setName(folderPath || this.t("processing.bindings.name"))
+			.setDesc(missingFolder
+				? this.t("processing.binding.folder.missing", { path: folderPath })
+				: this.getTaskLabel(binding.taskId))
+			.addButton((button) => button
+				.setButtonText("")
+				.setIcon("trash")
+				.onClick(async () => {
+					this.plugin.settings.taskBindings = this.plugin.settings.taskBindings.filter((item) => item.id !== binding.id);
+					await this.plugin.saveSettings();
+					this.display();
+				}));
+
+		new Setting(bindingEl)
+			.setName(this.t("processing.binding.auto.name"))
+			.setDesc(this.t("processing.binding.auto.desc"))
+			.addToggle((toggle) => toggle
+				.setValue(binding.autoProcess)
+				.onChange(async (value) => {
+					binding.autoProcess = value;
+					await this.plugin.saveSettings();
+				}));
+
+		new Setting(bindingEl)
+			.setName(this.t("processing.binding.folder.name"))
+			.setDesc(this.t("processing.binding.folder.desc"))
+			.addText((text) => text
+				.setPlaceholder(this.t("processing.binding.folder.placeholder"))
+				.setValue(binding.folderPath)
+				.onChange(async (value) => {
+					binding.folderPath = normalizeVaultFolderPath(value);
+					await this.plugin.saveSettings();
+				}));
+
+		new Setting(bindingEl)
+			.setName(this.t("processing.binding.recursive.name"))
+			.setDesc(this.t("processing.binding.recursive.desc"))
+			.addToggle((toggle) => toggle
+				.setValue(binding.recursive)
+				.onChange(async (value) => {
+					binding.recursive = value;
+					await this.plugin.saveSettings();
+				}));
+
+		new Setting(bindingEl)
+			.setName(this.t("processing.binding.prompt.name"))
+			.setDesc(binding.promptOverride.trim()
+				? this.t("processing.binding.prompt.custom")
+				: this.t("processing.binding.prompt.default"))
+			.addButton((button) => button
+				.setButtonText(this.t("processing.binding.prompt.edit"))
+				.setIcon("pencil")
+				.onClick(() => {
+					new PromptEditModal(this.app, {
+						title: this.t("processing.binding.prompt.modalTitle"),
+						value: getTaskPrompt(task, binding),
+						onSave: async (value) => {
+							binding.promptOverride = value.trim() === task.defaultPrompt.trim() ? "" : value;
+							await this.plugin.saveSettings();
+							this.display();
+						},
+						saveText: this.t("processing.binding.prompt.save"),
+						cancelText: this.t("processing.binding.prompt.cancel"),
+					}).open();
+				}))
+			.addButton((button) => button
+				.setButtonText(this.t("processing.binding.prompt.reset"))
+				.setIcon("rotate-ccw")
+				.onClick(async () => {
+					binding.promptOverride = "";
+					await this.plugin.saveSettings();
+					this.display();
+				}));
+	}
+
 	private addCheckSection(containerEl: HTMLElement): void {
 		const sectionEl = this.addSection(containerEl, this.t("section.check"));
 		const statusSetting = new Setting(sectionEl)
@@ -481,6 +664,30 @@ export class DocumentProcessingSettingTab extends PluginSettingTab {
 		return this.t("provider.codexLogin");
 	}
 
+	private getTaskLabel(taskId: string): string {
+		if (taskId === "web-clipper-bilingual-cleanup") {
+			return this.t("task.webClipperBilingualCleanup");
+		}
+
+		if (taskId === "anki-card-generation") {
+			return this.t("task.ankiCardGeneration");
+		}
+
+		return taskId;
+	}
+
+	private getAnkiCardLanguageLabel(language: AnkiCardLanguage): string {
+		if (language === "zh-CN") {
+			return this.t("anki.language.zhCN");
+		}
+
+		if (language === "en") {
+			return this.t("anki.language.en");
+		}
+
+		return this.t("anki.language.matchNote");
+	}
+
 	private getReasoningEffortLabel(effort: CodexReasoningEffort): string {
 		if (effort === "minimal") {
 			return this.t("reasoning.minimal");
@@ -585,5 +792,54 @@ export class DocumentProcessingSettingTab extends PluginSettingTab {
 
 	private t(key: Parameters<typeof translate>[1], values?: Parameters<typeof translate>[2]): string {
 		return translate(this.plugin.settings.language, key, values);
+	}
+}
+
+interface PromptEditModalOptions {
+	title: string;
+	value: string;
+	saveText: string;
+	cancelText: string;
+	onSave: (value: string) => Promise<void>;
+}
+
+class PromptEditModal extends Modal {
+	private options: PromptEditModalOptions;
+
+	constructor(app: App, options: PromptEditModalOptions) {
+		super(app);
+		this.options = options;
+	}
+
+	onOpen(): void {
+		this.setTitle(this.options.title);
+		const { contentEl } = this;
+		contentEl.empty();
+
+		const textarea = contentEl.createEl("textarea", {
+			cls: "document-processing-prompt-editor",
+		});
+		textarea.value = this.options.value;
+
+		new Setting(contentEl)
+			.addButton((button) => button
+				.setButtonText(this.options.cancelText)
+				.onClick(() => {
+					this.close();
+				}))
+			.addButton((button) => button
+				.setButtonText(this.options.saveText)
+				.setCta()
+				.onClick(async () => {
+					button.setDisabled(true);
+					await this.options.onSave(textarea.value);
+					this.close();
+				}));
+
+		textarea.focus();
+	}
+
+	onClose(): void {
+		this.contentEl.empty();
 	}
 }

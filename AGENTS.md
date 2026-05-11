@@ -93,6 +93,15 @@ npm run build
 - Persist settings using `this.loadData()` / `this.saveData()`.
 - Use stable command IDs; avoid renaming once released.
 
+## Document processing architecture
+
+- New document-processing features must follow the folder-bound task pipeline described in `docs/ARCHITECTURE.md` and `docs/DEVELOPMENT.md`.
+- Add new behavior as a `TaskDefinition`, then expose it through `TaskBinding` rather than hard-coding a command or folder path.
+- Keep the settings UI task-centric: list tasks first, then show folder bindings and the per-binding automatic-processing switch under each task.
+- Automatic processing must use the shared queue and `TaskRunner`; do not bypass cache writes, validation, token progress, or hash-checked `Vault.process` writeback.
+- Treat each task's `processedFrontmatterKey` boolean as its persistent processed marker, such as `llm: true` for Web cleanup and `anki: true` for Anki cards. Do not add a separate per-file processing database.
+- If a task needs prompt customization, expose it as a binding-level prompt override with a modal editor and a restore-default action.
+
 ## Versioning & releases
 
 - Bump `version` in `manifest.json` (SemVer) and update `versions.json` to map plugin version → minimum app version.

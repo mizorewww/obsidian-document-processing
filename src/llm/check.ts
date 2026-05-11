@@ -111,7 +111,7 @@ async function checkCodexLogin(
 
 	try {
 		const output = await requestCodexText(model, TEST_PROMPT, auth, requestOptions);
-		return buildResult(translate(settings.language, "provider.codexLogin"), model, output, Date.now() - startedAt, settings);
+		return buildResult(translate(settings.language, "provider.codexLogin"), model, output.text, Date.now() - startedAt, settings);
 	} catch (error) {
 		if (!(error instanceof CodexRequestError) || error.status !== 401) {
 			if (error instanceof CodexRequestError) {
@@ -128,7 +128,7 @@ async function checkCodexLogin(
 		settings.codexAuth = refreshed;
 		await saveSettings();
 		const output = await requestCodexText(model, TEST_PROMPT, refreshed, requestOptions);
-		return buildResult(translate(settings.language, "provider.codexLogin"), model, output, Date.now() - startedAt, settings);
+		return buildResult(translate(settings.language, "provider.codexLogin"), model, output.text, Date.now() - startedAt, settings);
 	}
 }
 
