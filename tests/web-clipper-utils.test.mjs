@@ -20,6 +20,9 @@ const {
 	hashString,
 } = await jiti.import("../src/utils/hash.ts");
 const {
+	normalizeFormattedSelection,
+} = await jiti.import("../src/editor/format-selection.ts");
+const {
 	buildEstimatedUsage,
 	estimateTokens,
 	usageFromApi,
@@ -125,6 +128,11 @@ test("rejects invalid LLM output before writeback", () => {
 test("hash detects changed source text", () => {
 	assert.equal(hashString("original") === hashString("changed"), false);
 	assert.equal(hashString("original"), hashString("original"));
+});
+
+test("selection formatter removes only whole markdown wrapper fences", () => {
+	assert.equal(normalizeFormattedSelection("```markdown\n# Title\n\nText\n```"), "# Title\n\nText");
+	assert.equal(normalizeFormattedSelection("```js\nconst x = 1;\n```"), "```js\nconst x = 1;\n```");
 });
 
 test("estimates and normalizes token usage", () => {

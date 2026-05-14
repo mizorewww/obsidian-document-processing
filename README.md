@@ -10,6 +10,7 @@ An Obsidian plugin for processing notes and documents with configurable model se
 - Choose intelligence and speed preferences when using OpenAI account sign-in.
 - Process the current Web Clipper note into cleaner Markdown, using bilingual output only when the source is mostly non-Chinese.
 - Create or update Anki cards in a note's `# Cards` section for the `obsidian_anki_sync` plugin.
+- Format only the selected Markdown and replace that selection after the model returns.
 - Bind processing tasks to vault folders and automatically process new unhandled notes.
 - Edit the prompt for each folder binding.
 - Cache originals and LLM output before replacing a note.
@@ -49,6 +50,10 @@ Test messages and future document-processing requests are sent to OpenAI only wh
 Use **Process current clipping** from the command palette while any Markdown note is open. If the note matches a Web Clipper folder binding, the command uses that binding's prompt; otherwise it runs the built-in Web Clipper cleanup task with its default prompt. The task cleans Web Clipper and Wikipedia-style notes, generates topic tags, and sets `llm: true` in the note properties. Mostly non-Chinese articles are rewritten as source-language paragraphs followed by Chinese paragraphs; mostly Chinese articles stay Chinese and are only cleaned, structured, and tagged.
 
 Use **Create/update Anki cards for current note** to generate or revise the note's `# Cards` section. The task writes cards in the Markdown format expected by `obsidian_anki_sync`, sets `anki: true`, preserves existing UUIDs when it keeps or edits existing cards, and never writes non-empty `path:` lines. Its card language setting defaults to Simplified Chinese and is placed at the top of the prompt.
+
+When a note already has `# Cards`, the manual Anki command asks for optional revision instructions before queueing the task. If Obsidian Git is available, the Anki prompt also includes the uncommitted diff for the currently opened file against Git `HEAD`, so the model can see how the note changed since the last committed version. Automatic Anki runs do not show the instruction dialog, but they still include the current-file diff when it is available.
+
+Use **Format selected text** from the command palette or the editor right-click menu while Markdown text is selected. The plugin sends only the selected text to the model, then replaces that same selection with formatted Markdown. If the selection changes while the model is working, the plugin leaves the note untouched.
 
 Folder tasks are configured in **Settings -> Community plugins -> Document Processing -> Processing**. The page lists each task first; under each task, add the vault folders that should use it. Each folder chooses whether automatic processing is on, whether subfolders are included, and whether to use a custom prompt. Prompt editing opens in a larger Markdown-style editor.
 

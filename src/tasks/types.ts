@@ -23,6 +23,13 @@ export interface TaskPrepareOptions {
 	settings: {
 		ankiCardLanguage?: unknown;
 	};
+	context?: TaskPrepareContext;
+}
+
+export interface TaskPrepareContext {
+	ankiRevisionInstructions?: string;
+	currentFileGitDiff?: string;
+	gitDiffUnavailableReason?: string;
 }
 
 export interface TaskInput {

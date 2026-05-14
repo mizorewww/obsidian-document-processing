@@ -33,6 +33,9 @@ export const ANKI_CARD_GENERATION_TASK: TaskDefinition = {
 				taskPrompt: options.prompt,
 				references: options.references,
 				cardLanguage: normalizeAnkiCardLanguage(options.settings.ankiCardLanguage),
+				revisionInstructions: options.context?.ankiRevisionInstructions,
+				currentFileGitDiff: options.context?.currentFileGitDiff,
+				gitDiffUnavailableReason: options.context?.gitDiffUnavailableReason,
 			}),
 			maxOutputTokens: 20000,
 		};

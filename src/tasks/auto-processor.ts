@@ -8,7 +8,7 @@ import {
 	shouldAutoProcessTask,
 	TaskBinding,
 } from "./bindings";
-import { ProcessingResult, TaskDefinition } from "./types";
+import { ProcessingResult, TaskDefinition, TaskPrepareContext } from "./types";
 import { DEFAULT_PROCESSING_TASK_ID, ProcessingTaskId } from "./task-ids";
 
 export type TaskRunSource = "manual" | "auto";
@@ -41,7 +41,7 @@ interface AutoProcessorOptions {
 	app: App;
 	getSettings: () => DocumentProcessingSettings;
 	getTaskDefinition: (taskId: ProcessingTaskId) => Pick<TaskDefinition, "name" | "processedFrontmatterKey">;
-	runTask: (file: TFile, binding: TaskBinding | null, source: TaskRunSource, pendingCount: number, taskId?: ProcessingTaskId, signal?: AbortSignal) => Promise<ProcessingResult>;
+	runTask: (file: TFile, binding: TaskBinding | null, source: TaskRunSource, pendingCount: number, taskId?: ProcessingTaskId, signal?: AbortSignal, context?: TaskPrepareContext) => Promise<ProcessingResult>;
 	onQueueChange: (state: AutoQueueState) => void;
 	onAutoFailure: (file: TFile, error: unknown) => void;
 }
@@ -56,6 +56,7 @@ interface QueueItem {
 	taskId: ProcessingTaskId;
 	queuedAt: number;
 	startedAt?: number;
+	context?: TaskPrepareContext;
 	resolve?: (result: ProcessingResult) => void;
 	reject?: (error: unknown) => void;
 }
@@ -165,7 +166,7 @@ export class AutoProcessor {
 		this.modifyTimers.set(file.path, timer);
 	}
 
-	enqueueManual(file: TFile, binding: TaskBinding | null, taskId?: ProcessingTaskId): Promise<ProcessingResult> {
+	enqueueManual(file: TFile, binding: TaskBinding | null, taskId?: ProcessingTaskId, context?: TaskPrepareContext): Promise<ProcessingResult> {
 		if (this.disposed) {
 			return Promise.reject(new ProcessingCanceledError("Processing queue is closed."));
 		}
@@ -181,6 +182,7 @@ export class AutoProcessor {
 				key,
 				taskId: manualTaskId,
 				queuedAt: Date.now(),
+				context,
 				abortController,
 				resolve,
 				reject,
@@ -285,7 +287,7 @@ export class AutoProcessor {
 						continue;
 					}
 
-					const result = await this.runTask(item.file, item.binding, item.source, this.queue.length, item.taskId, item.abortController.signal);
+					const result = await this.runTask(item.file, item.binding, item.source, this.queue.length, item.taskId, item.abortController.signal, item.context);
 					item.resolve?.(result);
 				} catch (error) {
 					if (item.source === "auto") {

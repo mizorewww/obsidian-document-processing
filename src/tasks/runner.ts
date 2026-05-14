@@ -5,7 +5,7 @@ import { LlmProgressCallback } from "../llm/token-usage";
 import { DocumentProcessingSettings } from "../settings-data";
 import { hashString } from "../utils/hash";
 import { getTaskPrompt, TaskBinding } from "./bindings";
-import { ProcessingJob, ProcessingResult, TaskDefinition, TaskInput, TaskReference } from "./types";
+import { ProcessingJob, ProcessingResult, TaskDefinition, TaskInput, TaskPrepareContext, TaskReference } from "./types";
 
 interface TaskRunnerOptions {
 	app: App;
@@ -18,6 +18,7 @@ interface TaskRunnerOptions {
 interface TaskRunOptions {
 	binding?: TaskBinding | null;
 	promptOverride?: string;
+	context?: TaskPrepareContext;
 	signal?: AbortSignal;
 }
 
@@ -57,7 +58,7 @@ export class TaskRunner {
 			const taskInput = this.buildTaskInput(file, originalMarkdown, originalHash);
 			const prompt = options.promptOverride?.trim() || getTaskPrompt(task, options.binding ?? null);
 			const references = this.loadTaskReferences(task);
-			const preparedRequest = task.prepare(taskInput, { prompt, references, settings: this.settings });
+			const preparedRequest = task.prepare(taskInput, { prompt, references, settings: this.settings, context: options.context });
 			const llmResponse = await requestLlmText({
 				settings: this.settings,
 				saveSettings: this.saveSettings,

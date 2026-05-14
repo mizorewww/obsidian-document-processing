@@ -30,6 +30,38 @@ test("puts the selected card language at the top of the prompt", () => {
 	assert.equal(normalizeAnkiCardLanguage("bad-value"), "zh-CN");
 });
 
+test("adds user revision instructions and current-file git diff when cards already exist", () => {
+	const prompt = buildAnkiCardPrompt({
+		filePath: "Learning/Note.md",
+		frontmatter: { anki: false },
+		body: [
+			"# Note",
+			"",
+			"Current note text.",
+			"",
+			"# Cards",
+			"",
+			"## Old card",
+			"{{c1::old}}",
+		].join("\n"),
+		taskPrompt: "",
+		references: [],
+		cardLanguage: "zh-CN",
+		revisionInstructions: "把旧卡合并成更完整的填空卡。",
+		currentFileGitDiff: [
+			"diff --git a/Learning/Note.md b/Learning/Note.md",
+			"@@ -1,3 +1,4 @@",
+			"+New source sentence.",
+		].join("\n"),
+	});
+
+	assert.match(prompt, /Card revision context/u);
+	assert.match(prompt, /把旧卡合并成更完整的填空卡/u);
+	assert.match(prompt, /HEAD -> working tree/u);
+	assert.match(prompt, /this exact opened note/u);
+	assert.match(prompt, /\+New source sentence/u);
+});
+
 test("parses Anki card JSON with new cards and preserved existing UUIDs", () => {
 	const raw = JSON.stringify({
 		cardsMarkdown: [

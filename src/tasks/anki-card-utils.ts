@@ -20,6 +20,9 @@ export interface BuildAnkiCardPromptInput {
 	taskPrompt: string;
 	references: TaskReference[];
 	cardLanguage: AnkiCardLanguage;
+	revisionInstructions?: string;
+	currentFileGitDiff?: string;
+	gitDiffUnavailableReason?: string;
 }
 
 export interface ParseAnkiCardLlmResultOptions {
@@ -71,6 +74,7 @@ export function buildAnkiCardPrompt(input: BuildAnkiCardPromptInput): string {
 	const existingCards = findAnkiCardsSection(input.body)?.sectionMarkdown ?? "";
 	const existingUuids = extractAnkiCardUuids(existingCards);
 	const references = formatReferences(input.references);
+	const revisionContext = formatRevisionContext(input, existingCards);
 
 	return [
 		getCardLanguageInstruction(input.cardLanguage),
@@ -84,11 +88,42 @@ export function buildAnkiCardPrompt(input: BuildAnkiCardPromptInput): string {
 		`Existing metadata: ${JSON.stringify(input.frontmatter)}`,
 		`Existing card UUIDs that may be preserved: ${existingUuids.length > 0 ? existingUuids.join(", ") : "(none)"}`,
 		"",
+		revisionContext,
+		"",
 		"Existing # Cards section, if any:",
 		existingCards || "(none)",
 		"",
 		"Source note markdown without YAML frontmatter:",
 		input.body.trim(),
+	].join("\n");
+}
+
+function formatRevisionContext(input: BuildAnkiCardPromptInput, existingCards: string): string {
+	if (!existingCards.trim()) {
+		return "Card revision context: no existing # Cards section was found, so create cards from the current note.";
+	}
+
+	const instructions = input.revisionInstructions?.trim();
+	const diff = input.currentFileGitDiff?.trim();
+	const diffStatus = diff
+		? [
+			"Current-file Git diff, HEAD -> working tree, for this opened note only:",
+			"```diff",
+			diff,
+			"```",
+		].join("\n")
+		: `Current-file Git diff: ${input.gitDiffUnavailableReason?.trim() || "No uncommitted diff for this file."}`;
+
+	return [
+		"Card revision context:",
+		"An existing # Cards section was found. Treat this as a card update task, not a blind regeneration task.",
+		"Use the current note as the source of truth. Use the user instruction and Git diff below as signals for what changed and how cards should be revised.",
+		"The Git diff is the uncommitted working-tree diff for this exact opened note versus the committed version at HEAD. It is not a comparison between recent commits.",
+		"",
+		"User instruction for revising cards:",
+		instructions || "(none)",
+		"",
+		diffStatus,
 	].join("\n");
 }
 

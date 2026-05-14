@@ -1,5 +1,12 @@
 import { Notice, Plugin, TFile } from "obsidian";
+import type { Editor } from "obsidian";
 import { checkLlmConnection } from "./llm/check";
+import {
+	formatSelectedMarkdown as formatEditorSelectionMarkdown,
+	hasEditorSelection,
+	SelectionChangedError,
+} from "./editor/format-selection";
+import { getCurrentFileWorkingTreeDiff } from "./git/current-file-diff";
 import { DocumentProcessingSettings, normalizeSettings } from "./settings-data";
 import { DocumentProcessingSettingTab } from "./settings";
 import { translate } from "./i18n";
@@ -10,9 +17,10 @@ import { LlmProgressUpdate, LlmTokenUsage } from "./llm/token-usage";
 import { AutoProcessor, AutoQueueState, ProcessingCanceledError, TaskRunSource } from "./tasks/auto-processor";
 import type { ProcessingQueueSnapshot } from "./tasks/auto-processor";
 import { findTaskBindingForFile, TaskBinding } from "./tasks/bindings";
-import { ProcessingResult } from "./tasks/types";
-import { ANKI_CARD_GENERATION_TASK_ID } from "./tasks/anki-card-utils";
+import { ProcessingResult, TaskPrepareContext } from "./tasks/types";
+import { ANKI_CARD_GENERATION_TASK_ID, findAnkiCardsSection } from "./tasks/anki-card-utils";
 import { PROCESSING_QUEUE_VIEW_TYPE, ProcessingQueueView } from "./ui/queue-view";
+import { openTextInputModal } from "./ui/text-input-modal";
 
 export default class DocumentProcessingPlugin extends Plugin {
 	settings: DocumentProcessingSettings;
@@ -29,7 +37,7 @@ export default class DocumentProcessingPlugin extends Plugin {
 			app: this.app,
 			getSettings: () => this.settings,
 			getTaskDefinition,
-			runTask: (file, binding, source, pendingCount, taskId, signal) => this.runTaskFile(file, binding, source, pendingCount, taskId, signal),
+			runTask: (file, binding, source, pendingCount, taskId, signal, context) => this.runTaskFile(file, binding, source, pendingCount, taskId, signal, context),
 			onQueueChange: (state) => this.handleAutoQueueChange(state),
 			onAutoFailure: (file, error) => this.handleAutoFailure(file, error),
 		});
@@ -91,7 +99,24 @@ export default class DocumentProcessingPlugin extends Plugin {
 			},
 		});
 
+		this.addCommand({
+			id: "format-selected-markdown",
+			name: translate(this.settings.language, "command.formatSelectedMarkdown"),
+			editorCheckCallback: (checking, editor) => {
+				if (!hasEditorSelection(editor)) {
+					return false;
+				}
+
+				if (!checking) {
+					void this.formatSelectedMarkdown(editor);
+				}
+
+				return true;
+			},
+		});
+
 		this.addRibbonActions();
+		this.registerEditorMenu();
 
 		this.registerEvent(this.app.vault.on("create", (file) => {
 			void this.autoProcessor?.handleCreate(file);
@@ -145,6 +170,21 @@ export default class DocumentProcessingPlugin extends Plugin {
 		this.addRibbonIcon("list-todo", translate(this.settings.language, "command.openProcessingQueuePanel"), () => {
 			void this.openProcessingQueuePanel();
 		});
+	}
+
+	private registerEditorMenu(): void {
+		this.registerEvent(this.app.workspace.on("editor-menu", (menu, editor) => {
+			if (!hasEditorSelection(editor)) {
+				return;
+			}
+
+			menu.addItem((item) => item
+				.setTitle(translate(this.settings.language, "command.formatSelectedMarkdown"))
+				.setIcon("align-left")
+				.onClick(() => {
+					void this.formatSelectedMarkdown(editor);
+				}));
+		}));
 	}
 
 	private async checkSelectedModel(): Promise<void> {
@@ -205,10 +245,18 @@ export default class DocumentProcessingPlugin extends Plugin {
 			file.path,
 			this.settings.taskBindings.filter((item) => item.taskId === ANKI_CARD_GENERATION_TASK_ID),
 		);
+		const revisionInstructions = await this.requestAnkiRevisionInstructions(file);
+		if (revisionInstructions === null) {
+			return;
+		}
+
+		const context: TaskPrepareContext | undefined = revisionInstructions === undefined
+			? undefined
+			: { ankiRevisionInstructions: revisionInstructions };
 		new Notice(translate(this.settings.language, "task.process.queued"));
 
 		try {
-			const result = await this.autoProcessor.enqueueManual(file, binding, ANKI_CARD_GENERATION_TASK_ID);
+			const result = await this.autoProcessor.enqueueManual(file, binding, ANKI_CARD_GENERATION_TASK_ID, context);
 			this.hideProcessingProgress();
 			if (this.settings.showCompletionNotice) {
 				new Notice(this.getSuccessMessage(result.tokenUsage));
@@ -225,6 +273,55 @@ export default class DocumentProcessingPlugin extends Plugin {
 		}
 	}
 
+	private async requestAnkiRevisionInstructions(file: TFile): Promise<string | null | undefined> {
+		if (!await this.fileHasAnkiCards(file)) {
+			return undefined;
+		}
+
+		return openTextInputModal(this.app, {
+			title: translate(this.settings.language, "anki.revision.modal.title"),
+			description: translate(this.settings.language, "anki.revision.modal.desc"),
+			placeholder: translate(this.settings.language, "anki.revision.modal.placeholder"),
+			submitText: translate(this.settings.language, "anki.revision.modal.submit"),
+			cancelText: translate(this.settings.language, "anki.revision.modal.cancel"),
+		});
+	}
+
+	private async fileHasAnkiCards(file: TFile): Promise<boolean> {
+		const markdown = await this.app.vault.cachedRead(file);
+		return findAnkiCardsSection(markdown) !== null;
+	}
+
+	private async formatSelectedMarkdown(editor: Editor): Promise<void> {
+		let latestUsage: LlmTokenUsage | undefined;
+		this.showProcessingProgress(translate(this.settings.language, "selection.format.start"), true);
+
+		try {
+			const result = await formatEditorSelectionMarkdown({
+				editor,
+				settings: this.settings,
+				saveSettings: () => this.saveSettings(),
+				onProgress: (progress) => {
+					latestUsage = progress;
+					this.updateProcessingProgress(progress);
+				},
+			});
+			this.hideProcessingProgress();
+			if (this.settings.showCompletionNotice) {
+				new Notice(translate(this.settings.language, "selection.format.success", this.formatUsage(result.tokenUsage ?? latestUsage)));
+			}
+		} catch (error) {
+			this.hideProcessingProgress();
+			if (error instanceof SelectionChangedError) {
+				new Notice(translate(this.settings.language, "selection.format.changed"));
+				return;
+			}
+
+			const message = error instanceof Error ? error.message : String(error);
+			new Notice(translate(this.settings.language, "selection.format.failure", { message }));
+		}
+	}
+
 	private async runTaskFile(
 		file: TFile,
 		binding: TaskBinding | null,
@@ -232,6 +329,7 @@ export default class DocumentProcessingPlugin extends Plugin {
 		pendingCount: number,
 		taskId?: ProcessingTaskId,
 		signal?: AbortSignal,
+		context?: TaskPrepareContext,
 	): Promise<ProcessingResult> {
 		let latestUsage: LlmTokenUsage | undefined;
 		this.activeQueuePending = pendingCount;
@@ -239,6 +337,7 @@ export default class DocumentProcessingPlugin extends Plugin {
 
 		try {
 			const task = getTaskDefinition(taskId ?? binding?.taskId ?? DEFAULT_PROCESSING_TASK_ID);
+			const taskContext = await this.buildTaskRunContext(file, task.id, context);
 			const runner = new TaskRunner({
 				app: this.app,
 				manifest: this.manifest,
@@ -249,7 +348,7 @@ export default class DocumentProcessingPlugin extends Plugin {
 					this.updateProcessingProgress(progress);
 				},
 			});
-			const result = await runner.run(task, file, { binding, signal });
+			const result = await runner.run(task, file, { binding, signal, context: taskContext });
 			return {
 				...result,
 				tokenUsage: result.tokenUsage ?? latestUsage,
@@ -257,6 +356,21 @@ export default class DocumentProcessingPlugin extends Plugin {
 		} finally {
 			this.hideProcessingProgress();
 		}
+	}
+
+	private async buildTaskRunContext(file: TFile, taskId: ProcessingTaskId, context?: TaskPrepareContext): Promise<TaskPrepareContext | undefined> {
+		if (taskId !== ANKI_CARD_GENERATION_TASK_ID || !await this.fileHasAnkiCards(file)) {
+			return context;
+		}
+
+		const diff = await getCurrentFileWorkingTreeDiff(this.app, file);
+		return {
+			...context,
+			currentFileGitDiff: diff.diff,
+			gitDiffUnavailableReason: diff.diff
+				? undefined
+				: diff.unavailableReason,
+		};
 	}
 
 	private isMarkdownFile(file: TFile | null): file is TFile {
