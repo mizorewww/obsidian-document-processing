@@ -4,7 +4,7 @@ import { createJiti } from "jiti";
 
 const jiti = createJiti(import.meta.url);
 const {
-	createQueueKey,
+	createQueueSlotKey,
 	fileMatchesTaskBinding,
 	findAutoTaskBindingForFile,
 	findTaskBindingForFile,
@@ -82,7 +82,7 @@ test("uses binding prompt override before task default", () => {
 
 test("deduplicates only currently queued auto processing keys", () => {
 	const tracker = new AutoProcessDedupeTracker();
-	const key = createQueueKey("Learning/Clippings/Article.md", "hash-a", "web-clipper-bilingual-cleanup");
+	const key = "auto:Learning/Clippings/Article.md:web-clipper-bilingual-cleanup:test";
 
 	assert.equal(tracker.canQueue(key), true);
 	tracker.markQueued(key);
@@ -91,9 +91,9 @@ test("deduplicates only currently queued auto processing keys", () => {
 	assert.equal(tracker.canQueue(key), true);
 });
 
-test("queue keys are separate per task for the same file hash", () => {
-	const webKey = createQueueKey("Learning/Clippings/Article.md", "hash-a", "web-clipper-bilingual-cleanup");
-	const ankiKey = createQueueKey("Learning/Clippings/Article.md", "hash-a", "anki-card-generation");
+test("auto queue slots are separate per task for the same file", () => {
+	const webKey = createQueueSlotKey("Learning/Clippings/Article.md", "web-clipper-bilingual-cleanup");
+	const ankiKey = createQueueSlotKey("Learning/Clippings/Article.md", "anki-card-generation");
 
 	assert.notEqual(webKey, ankiKey);
 });
@@ -132,6 +132,107 @@ test("auto scanning can enqueue one candidate per matching task", async () => {
 	assert.deepEqual(candidates.map((candidate) => candidate.binding.id), ["clippings", "anki"]);
 });
 
+test("active auto tasks stay deduplicated until they finish", async () => {
+	const file = {
+		path: "Learning/Clippings/New.md",
+		extension: "md",
+	};
+	const markdown = "---\nllm: false\n---\n# Note\n";
+	const processor = new AutoProcessor({
+		app: {
+			vault: {
+				getMarkdownFiles: () => [file],
+				cachedRead: async () => markdown,
+			},
+		},
+		getSettings: () => ({
+			taskBindings: [binding],
+		}),
+		getTaskDefinition: () => ({
+			name: "Web clipping cleanup",
+			processedFrontmatterKey: "llm",
+		}),
+		runTask: async (_file, _binding, _source, _pendingCount, _taskId, signal) => {
+			await new Promise((_, reject) => {
+				signal.addEventListener("abort", () => reject(new ProcessingCanceledError()), { once: true });
+			});
+		},
+		onQueueChange: () => undefined,
+		onAutoFailure: () => undefined,
+	});
+
+	await processor.scanAll();
+	await new Promise((resolve) => setTimeout(resolve, 0));
+	assert.equal(processor.getQueueSnapshot().totalCount, 1);
+
+	await processor.handleCreate(file);
+	await new Promise((resolve) => setTimeout(resolve, 0));
+	const snapshot = processor.getQueueSnapshot();
+	assert.equal(snapshot.totalCount, 1);
+	assert.equal(snapshot.active?.filePath, "Learning/Clippings/New.md");
+	assert.equal(typeof snapshot.active?.queuedAt, "number");
+	assert.equal(typeof snapshot.active?.startedAt, "number");
+	assert.equal(snapshot.pending.length, 0);
+
+	processor.cancelAll();
+	await new Promise((resolve) => setTimeout(resolve, 0));
+});
+
+test("auto file changes during an active task coalesce into one follow-up task", async () => {
+	const file = {
+		path: "Learning/Clippings/New.md",
+		extension: "md",
+	};
+	let markdown = "---\nllm: false\n---\n# Note\n\nFirst version.\n";
+	const processor = new AutoProcessor({
+		app: {
+			vault: {
+				getMarkdownFiles: () => [file],
+				cachedRead: async () => markdown,
+			},
+		},
+		getSettings: () => ({
+			taskBindings: [binding],
+		}),
+		getTaskDefinition: () => ({
+			name: "Web clipping cleanup",
+			processedFrontmatterKey: "llm",
+		}),
+		runTask: async (_file, _binding, _source, _pendingCount, _taskId, signal) => {
+			await new Promise((_, reject) => {
+				signal.addEventListener("abort", () => reject(new ProcessingCanceledError()), { once: true });
+			});
+		},
+		onQueueChange: () => undefined,
+		onAutoFailure: () => undefined,
+	});
+
+	await processor.scanAll();
+	await new Promise((resolve) => setTimeout(resolve, 0));
+
+	markdown = "---\nllm: false\n---\n# Note\n\nSecond version.\n";
+	await processor.handleRename(file);
+	await new Promise((resolve) => setTimeout(resolve, 0));
+	const firstEditSnapshot = processor.getQueueSnapshot();
+	assert.equal(firstEditSnapshot.totalCount, 2);
+	assert.equal(firstEditSnapshot.pending.length, 1);
+	assert.equal(typeof firstEditSnapshot.active?.startedAt, "number");
+	assert.equal(typeof firstEditSnapshot.pending[0]?.queuedAt, "number");
+	assert.equal(firstEditSnapshot.pending[0]?.startedAt, null);
+	const firstPendingId = firstEditSnapshot.pending[0]?.id;
+
+	markdown = "---\nllm: false\n---\n# Note\n\nThird version.\n";
+	await processor.handleRename(file);
+	await new Promise((resolve) => setTimeout(resolve, 0));
+	const secondEditSnapshot = processor.getQueueSnapshot();
+	assert.equal(secondEditSnapshot.totalCount, 2);
+	assert.equal(secondEditSnapshot.pending.length, 1);
+	assert.equal(secondEditSnapshot.pending[0]?.id, firstPendingId);
+
+	processor.cancelAll();
+	await new Promise((resolve) => setTimeout(resolve, 0));
+});
+
 test("queue cancellation rejects pending work", async () => {
 	const processor = new AutoProcessor({
 		app: {
@@ -163,6 +264,46 @@ test("queue cancellation rejects pending work", async () => {
 	assert.equal(processor.cancelAll(), 2);
 	await assert.rejects(first, ProcessingCanceledError);
 	await assert.rejects(second, ProcessingCanceledError);
+});
+
+test("queue snapshot exposes tasks and cancelItem cancels a specific task", async () => {
+	const processor = new AutoProcessor({
+		app: {
+			vault: {
+				cachedRead: async () => "# Note\n",
+			},
+		},
+		getSettings: () => ({
+			taskBindings: [],
+		}),
+		getTaskDefinition: (taskId) => ({
+			name: taskId === "anki-card-generation" ? "Anki card generation" : "Web clipping cleanup",
+			processedFrontmatterKey: "llm",
+		}),
+		runTask: async (_file, _binding, _source, _pendingCount, _taskId, signal) => {
+			await new Promise((_, reject) => {
+				signal.addEventListener("abort", () => reject(new ProcessingCanceledError()), { once: true });
+			});
+		},
+		onQueueChange: () => undefined,
+		onAutoFailure: () => undefined,
+	});
+	const file = {
+		path: "Learning/Clippings/New.md",
+		extension: "md",
+	};
+	const first = processor.enqueueManual(file, binding, "anki-card-generation");
+	const second = processor.enqueueManual(file, binding, "web-clipper-bilingual-cleanup");
+	await new Promise((resolve) => setTimeout(resolve, 0));
+
+	const snapshot = processor.getQueueSnapshot();
+	assert.equal(snapshot.active?.taskId, "anki-card-generation");
+	assert.equal(snapshot.active?.taskName, "Anki card generation");
+	assert.equal(snapshot.pending[0]?.taskId, "web-clipper-bilingual-cleanup");
+	assert.equal(processor.cancelItem(snapshot.pending[0]?.id ?? ""), true);
+	await assert.rejects(second, ProcessingCanceledError);
+	assert.equal(processor.cancelItem(snapshot.active?.id ?? ""), true);
+	await assert.rejects(first, ProcessingCanceledError);
 });
 
 test("startup scanning candidates are unprocessed markdown files in bound folders", () => {

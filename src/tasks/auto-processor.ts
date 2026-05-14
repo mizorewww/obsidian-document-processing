@@ -2,9 +2,8 @@ import type { App, TAbstractFile, TFile } from "obsidian";
 import { parseYaml } from "obsidian";
 import { splitFrontmatter } from "../markdown/frontmatter";
 import { DocumentProcessingSettings } from "../settings-data";
-import { hashString } from "../utils/hash";
 import {
-	createQueueKey,
+	createQueueSlotKey,
 	findTaskBindingForFile,
 	shouldAutoProcessTask,
 	TaskBinding,
@@ -19,10 +18,29 @@ export interface AutoQueueState {
 	activeFilePath: string | null;
 }
 
+export type QueueTaskStatus = "pending" | "running" | "canceling";
+
+export interface QueueTaskSnapshot {
+	id: string;
+	filePath: string;
+	taskId: ProcessingTaskId;
+	taskName: string;
+	source: TaskRunSource;
+	status: QueueTaskStatus;
+	queuedAt: number;
+	startedAt: number | null;
+}
+
+export interface ProcessingQueueSnapshot {
+	active: QueueTaskSnapshot | null;
+	pending: QueueTaskSnapshot[];
+	totalCount: number;
+}
+
 interface AutoProcessorOptions {
 	app: App;
 	getSettings: () => DocumentProcessingSettings;
-	getTaskDefinition: (taskId: ProcessingTaskId) => Pick<TaskDefinition, "processedFrontmatterKey">;
+	getTaskDefinition: (taskId: ProcessingTaskId) => Pick<TaskDefinition, "name" | "processedFrontmatterKey">;
 	runTask: (file: TFile, binding: TaskBinding | null, source: TaskRunSource, pendingCount: number, taskId?: ProcessingTaskId, signal?: AbortSignal) => Promise<ProcessingResult>;
 	onQueueChange: (state: AutoQueueState) => void;
 	onAutoFailure: (file: TFile, error: unknown) => void;
@@ -33,15 +51,21 @@ interface QueueItem {
 	binding: TaskBinding | null;
 	source: TaskRunSource;
 	key: string;
+	slotKey?: string;
 	abortController: AbortController;
-	taskId?: ProcessingTaskId;
+	taskId: ProcessingTaskId;
+	queuedAt: number;
+	startedAt?: number;
 	resolve?: (result: ProcessingResult) => void;
 	reject?: (error: unknown) => void;
 }
 
 interface Candidate {
 	binding: TaskBinding;
-	hash: string;
+}
+
+interface AutoEnqueueOptions {
+	queueFollowUpForActive: boolean;
 }
 
 export class AutoProcessDedupeTracker {
@@ -77,9 +101,9 @@ export class AutoProcessor {
 	private queue: QueueItem[] = [];
 	private dedupe = new AutoProcessDedupeTracker();
 	private processing = false;
-	private activeFilePath: string | null = null;
-	private activeAbortController: AbortController | null = null;
+	private activeItem: QueueItem | null = null;
 	private modifyTimers = new Map<string, number>();
+	private disposed = false;
 
 	constructor(options: AutoProcessorOptions) {
 		this.app = options.app;
@@ -91,24 +115,40 @@ export class AutoProcessor {
 	}
 
 	async scanAll(): Promise<void> {
+		if (this.disposed) {
+			return;
+		}
+
 		for (const file of this.app.vault.getMarkdownFiles()) {
-			await this.enqueueAutoCandidates(file);
+			await this.enqueueAutoCandidates(file, { queueFollowUpForActive: false });
 		}
 	}
 
 	async handleCreate(file: TAbstractFile): Promise<void> {
+		if (this.disposed) {
+			return;
+		}
+
 		if (isMarkdownFile(file)) {
-			await this.enqueueAutoCandidates(file);
+			await this.enqueueAutoCandidates(file, { queueFollowUpForActive: false });
 		}
 	}
 
 	async handleRename(file: TAbstractFile): Promise<void> {
+		if (this.disposed) {
+			return;
+		}
+
 		if (isMarkdownFile(file)) {
-			await this.enqueueAutoCandidates(file);
+			await this.enqueueAutoCandidates(file, { queueFollowUpForActive: true });
 		}
 	}
 
 	handleModify(file: TAbstractFile): void {
+		if (this.disposed) {
+			return;
+		}
+
 		if (!isMarkdownFile(file)) {
 			return;
 		}
@@ -120,14 +160,18 @@ export class AutoProcessor {
 
 		const timer = window.setTimeout(() => {
 			this.modifyTimers.delete(file.path);
-			void this.enqueueAutoCandidates(file);
+			void this.enqueueAutoCandidates(file, { queueFollowUpForActive: true });
 		}, 1500);
 		this.modifyTimers.set(file.path, timer);
 	}
 
 	enqueueManual(file: TFile, binding: TaskBinding | null, taskId?: ProcessingTaskId): Promise<ProcessingResult> {
+		if (this.disposed) {
+			return Promise.reject(new ProcessingCanceledError("Processing queue is closed."));
+		}
+
 		return new Promise((resolve, reject) => {
-			const manualTaskId = taskId ?? binding?.taskId;
+			const manualTaskId = taskId ?? binding?.taskId ?? DEFAULT_PROCESSING_TASK_ID;
 			const key = `manual:${file.path}:${manualTaskId ?? "default"}:${Date.now().toString(36)}:${Math.random().toString(36).slice(2, 8)}`;
 			const abortController = new AbortController();
 			this.queue.push({
@@ -135,7 +179,8 @@ export class AutoProcessor {
 				binding,
 				source: "manual",
 				key,
-				taskId,
+				taskId: manualTaskId,
+				queuedAt: Date.now(),
 				abortController,
 				resolve,
 				reject,
@@ -146,26 +191,40 @@ export class AutoProcessor {
 		});
 	}
 
-	private async enqueueAutoCandidates(file: TFile): Promise<void> {
+	private async enqueueAutoCandidates(file: TFile, options: AutoEnqueueOptions): Promise<void> {
+		if (this.disposed) {
+			return;
+		}
+
 		const candidates = await this.getAutoCandidates(file);
+		const candidateSlotKeys = new Set(candidates.map((candidate) => createQueueSlotKey(file.path, candidate.binding.taskId)));
+		this.removeStalePendingAutoItems(file.path, candidateSlotKeys);
+
 		if (candidates.length === 0) {
+			this.notifyQueueChange();
 			return;
 		}
 
 		for (const candidate of candidates) {
-			const key = createQueueKey(file.path, candidate.hash, candidate.binding.taskId);
-			if (!this.dedupe.canQueue(key)) {
+			const slotKey = createQueueSlotKey(file.path, candidate.binding.taskId);
+			const pendingItem = this.findPendingAutoItem(slotKey);
+			const activeItem = this.activeItem?.source === "auto" && this.activeItem.slotKey === slotKey
+				? this.activeItem
+				: null;
+
+			if (pendingItem) {
+				this.updateAutoQueueItem(pendingItem, file, candidate.binding);
 				continue;
 			}
 
-			this.queue.push({
-				file,
-				binding: candidate.binding,
-				source: "auto",
-				key,
-				abortController: new AbortController(),
-			});
-			this.dedupe.markQueued(key);
+			if (activeItem) {
+				if (options.queueFollowUpForActive) {
+					this.queue.push(this.createAutoQueueItem(file, candidate.binding, slotKey));
+				}
+				continue;
+			}
+
+			this.queue.push(this.createAutoQueueItem(file, candidate.binding, slotKey));
 		}
 		this.notifyQueueChange();
 		void this.processQueue();
@@ -180,13 +239,11 @@ export class AutoProcessor {
 
 		const markdown = await this.app.vault.cachedRead(file);
 		const frontmatter = parseFrontmatterFromMarkdown(markdown);
-		const hash = hashString(markdown);
 
 		return bindings
 			.filter((binding) => shouldAutoProcessTask(frontmatter, this.getTaskDefinition(binding.taskId)))
 			.map((binding) => ({
 				binding,
-				hash,
 			}));
 	}
 
@@ -199,7 +256,7 @@ export class AutoProcessor {
 	}
 
 	private async processQueue(): Promise<void> {
-		if (this.processing) {
+		if (this.disposed || this.processing) {
 			return;
 		}
 
@@ -211,12 +268,15 @@ export class AutoProcessor {
 					continue;
 				}
 
-				this.dedupe.markDequeued(item.key);
-				this.activeFilePath = item.file.path;
-				this.activeAbortController = item.abortController;
+				this.activeItem = item;
+				item.startedAt = Date.now();
 				this.notifyQueueChange();
 
 				try {
+					if (this.disposed) {
+						throw new ProcessingCanceledError("Processing queue is closed.");
+					}
+
 					if (item.abortController.signal.aborted) {
 						throw new ProcessingCanceledError();
 					}
@@ -233,15 +293,16 @@ export class AutoProcessor {
 					}
 					item.reject?.(error);
 				} finally {
-					this.activeFilePath = null;
-					this.activeAbortController = null;
+					this.dedupe.markDequeued(item.key);
+					if (this.activeItem === item) {
+						this.activeItem = null;
+					}
 					this.notifyQueueChange();
 				}
 			}
 		} finally {
 			this.processing = false;
-			this.activeFilePath = null;
-			this.activeAbortController = null;
+			this.activeItem = null;
 			this.notifyQueueChange();
 		}
 	}
@@ -262,13 +323,53 @@ export class AutoProcessor {
 			canceledCount += 1;
 		}
 
-		if (this.activeAbortController && !this.activeAbortController.signal.aborted) {
-			this.activeAbortController.abort();
+		if (this.activeItem) {
+			if (!this.activeItem.abortController.signal.aborted) {
+				this.activeItem.abortController.abort();
+			}
+			this.activeItem.reject?.(error);
 			canceledCount += 1;
 		}
 
 		this.notifyQueueChange();
 		return canceledCount;
+	}
+
+	cancelItem(id: string): boolean {
+		const pendingIndex = this.queue.findIndex((item) => item.key === id);
+		if (pendingIndex >= 0) {
+			const item = this.queue.splice(pendingIndex, 1)[0];
+			if (!item) {
+				return false;
+			}
+
+			item.abortController.abort();
+			this.dedupe.markDequeued(item.key);
+			item.reject?.(new ProcessingCanceledError());
+			this.notifyQueueChange();
+			return true;
+		}
+
+		if (this.activeItem?.key === id) {
+			if (!this.activeItem.abortController.signal.aborted) {
+				this.activeItem.abortController.abort();
+			}
+			this.activeItem.reject?.(new ProcessingCanceledError());
+			this.notifyQueueChange();
+			return true;
+		}
+
+		return false;
+	}
+
+	getQueueSnapshot(): ProcessingQueueSnapshot {
+		const active = this.activeItem ? this.createQueueTaskSnapshot(this.activeItem, "running") : null;
+		const pending = this.queue.map((item) => this.createQueueTaskSnapshot(item, "pending"));
+		return {
+			active,
+			pending,
+			totalCount: pending.length + (active ? 1 : 0),
+		};
 	}
 
 	private async isStillAutoCandidate(item: QueueItem): Promise<boolean> {
@@ -280,11 +381,84 @@ export class AutoProcessor {
 		return candidates.some((candidate) => candidate.binding.id === item.binding?.id);
 	}
 
+	private findPendingAutoItem(slotKey: string): QueueItem | null {
+		return this.queue.find((item) => item.source === "auto" && item.slotKey === slotKey) ?? null;
+	}
+
+	private updateAutoQueueItem(item: QueueItem, file: TFile, binding: TaskBinding): void {
+		item.file = file;
+		item.binding = binding;
+		item.taskId = binding.taskId;
+		item.slotKey = createQueueSlotKey(file.path, binding.taskId);
+	}
+
+	private createAutoQueueItem(file: TFile, binding: TaskBinding, slotKey: string): QueueItem {
+		const key = createAutoQueueItemKey(slotKey);
+		const item: QueueItem = {
+			file,
+			binding,
+			source: "auto",
+			key,
+			slotKey,
+			taskId: binding.taskId,
+			queuedAt: Date.now(),
+			abortController: new AbortController(),
+		};
+		this.dedupe.markQueued(key);
+		return item;
+	}
+
+	private removeStalePendingAutoItems(filePath: string, candidateSlotKeys: Set<string>): void {
+		for (const item of [...this.queue]) {
+			if (item.source !== "auto" || item.slotKey !== createQueueSlotKey(filePath, item.taskId)) {
+				continue;
+			}
+
+			if (!candidateSlotKeys.has(item.slotKey)) {
+				this.removeQueuedItem(item);
+			}
+		}
+	}
+
+	private removeQueuedItem(item: QueueItem): void {
+		const index = this.queue.indexOf(item);
+		if (index < 0) {
+			return;
+		}
+
+		this.queue.splice(index, 1);
+		this.dedupe.markDequeued(item.key);
+		item.abortController.abort();
+	}
+
 	private notifyQueueChange(): void {
 		this.onQueueChange({
 			pendingCount: this.queue.length,
-			activeFilePath: this.activeFilePath,
+			activeFilePath: this.activeItem?.file.path ?? null,
 		});
+	}
+
+	private createQueueTaskSnapshot(item: QueueItem, status: QueueTaskStatus): QueueTaskSnapshot {
+		const taskId = item.taskId;
+		return {
+			id: item.key,
+			filePath: item.file.path,
+			taskId,
+			taskName: this.getTaskDefinition(taskId).name,
+			source: item.source,
+			status: item.abortController.signal.aborted ? "canceling" : status,
+			queuedAt: item.queuedAt,
+			startedAt: item.startedAt ?? null,
+		};
+	}
+
+	destroy(): void {
+		if (this.disposed) {
+			return;
+		}
+
+		this.disposed = true;
+		this.cancelAll();
 	}
 }
 
@@ -314,4 +488,8 @@ function getTaskRunOrder(taskId: ProcessingTaskId): number {
 	}
 
 	return 10;
+}
+
+function createAutoQueueItemKey(slotKey: string): string {
+	return `auto:${slotKey}:${Date.now().toString(36)}:${Math.random().toString(36).slice(2, 8)}`;
 }

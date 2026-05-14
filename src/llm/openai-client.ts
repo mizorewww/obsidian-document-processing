@@ -153,6 +153,10 @@ async function requestOpenAiTextStreaming(request: OpenAiTextRequest, inputToken
 			signal: request.signal,
 		});
 	} catch (error) {
+		if (isAbortError(error) || request.signal?.aborted) {
+			throw new Error("Processing queue canceled.");
+		}
+
 		throw new StreamingUnavailableError(error instanceof Error ? error.message : "Streaming request failed.");
 	}
 
@@ -207,6 +211,11 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
 	if (signal?.aborted) {
 		throw new Error("Processing queue canceled.");
 	}
+}
+
+function isAbortError(error: unknown): boolean {
+	return error instanceof DOMException && error.name === "AbortError"
+		|| error instanceof Error && error.name === "AbortError";
 }
 
 function formatOpenAiError(status: number, payload: OpenAiResponsePayload): string {

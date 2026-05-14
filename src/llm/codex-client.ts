@@ -159,6 +159,10 @@ async function requestCodexTextStreaming(
 			signal: options.signal,
 		});
 	} catch (error) {
+		if (isAbortError(error) || options.signal?.aborted) {
+			throw new Error("Processing queue canceled.");
+		}
+
 		throw new StreamingUnavailableError(error instanceof Error ? error.message : "Streaming request failed.");
 	}
 
@@ -276,6 +280,11 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
 	if (signal?.aborted) {
 		throw new Error("Processing queue canceled.");
 	}
+}
+
+function isAbortError(error: unknown): boolean {
+	return error instanceof DOMException && error.name === "AbortError"
+		|| error instanceof Error && error.name === "AbortError";
 }
 
 function extractOutputItemText(payload: CodexSsePayload): string {

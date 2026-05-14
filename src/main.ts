@@ -8,9 +8,11 @@ import { DEFAULT_PROCESSING_TASK_ID, ProcessingTaskId } from "./tasks/task-ids";
 import { TaskRunner } from "./tasks/runner";
 import { LlmProgressUpdate, LlmTokenUsage } from "./llm/token-usage";
 import { AutoProcessor, AutoQueueState, ProcessingCanceledError, TaskRunSource } from "./tasks/auto-processor";
+import type { ProcessingQueueSnapshot } from "./tasks/auto-processor";
 import { findTaskBindingForFile, TaskBinding } from "./tasks/bindings";
 import { ProcessingResult } from "./tasks/types";
 import { ANKI_CARD_GENERATION_TASK_ID } from "./tasks/anki-card-utils";
+import { PROCESSING_QUEUE_VIEW_TYPE, ProcessingQueueView } from "./ui/queue-view";
 
 export default class DocumentProcessingPlugin extends Plugin {
 	settings: DocumentProcessingSettings;
@@ -31,6 +33,7 @@ export default class DocumentProcessingPlugin extends Plugin {
 			onQueueChange: (state) => this.handleAutoQueueChange(state),
 			onAutoFailure: (file, error) => this.handleAutoFailure(file, error),
 		});
+		this.registerView(PROCESSING_QUEUE_VIEW_TYPE, (leaf) => new ProcessingQueueView(leaf, this));
 
 		this.addCommand({
 			id: "check-llm-connection",
@@ -80,6 +83,14 @@ export default class DocumentProcessingPlugin extends Plugin {
 			callback: () => this.cancelProcessingQueue(),
 		});
 
+		this.addCommand({
+			id: "open-processing-queue-panel",
+			name: translate(this.settings.language, "command.openProcessingQueuePanel"),
+			callback: () => {
+				void this.openProcessingQueuePanel();
+			},
+		});
+
 		this.addRibbonActions();
 
 		this.registerEvent(this.app.vault.on("create", (file) => {
@@ -96,6 +107,12 @@ export default class DocumentProcessingPlugin extends Plugin {
 		});
 
 		this.addSettingTab(new DocumentProcessingSettingTab(this.app, this));
+	}
+
+	onunload(): void {
+		this.autoProcessor?.destroy();
+		this.autoProcessor = null;
+		this.hideProcessingProgress();
 	}
 
 	async loadSettings() {
@@ -124,6 +141,9 @@ export default class DocumentProcessingPlugin extends Plugin {
 		});
 		this.addRibbonIcon("circle-stop", translate(this.settings.language, "command.cancelProcessingQueue"), () => {
 			this.cancelProcessingQueue();
+		});
+		this.addRibbonIcon("list-todo", translate(this.settings.language, "command.openProcessingQueuePanel"), () => {
+			void this.openProcessingQueuePanel();
 		});
 	}
 
@@ -290,6 +310,7 @@ export default class DocumentProcessingPlugin extends Plugin {
 
 	private handleAutoQueueChange(state: AutoQueueState): void {
 		this.activeQueuePending = state.pendingCount;
+		this.refreshQueueViews();
 		if (!state.activeFilePath && state.pendingCount > 0) {
 			this.setProcessingStatus(translate(this.settings.language, "task.queue.waiting", { count: state.pendingCount }));
 		}
@@ -311,12 +332,48 @@ export default class DocumentProcessingPlugin extends Plugin {
 		}));
 	}
 
-	private cancelProcessingQueue(): void {
+	async openProcessingQueuePanel(): Promise<void> {
+		let leaf = this.app.workspace.getLeavesOfType(PROCESSING_QUEUE_VIEW_TYPE)[0];
+		if (!leaf) {
+			leaf = this.app.workspace.getRightLeaf(false) ?? this.app.workspace.getLeaf(true);
+			await leaf.setViewState({ type: PROCESSING_QUEUE_VIEW_TYPE, active: true });
+		}
+
+		await this.app.workspace.revealLeaf(leaf);
+		this.refreshQueueViews();
+	}
+
+	getProcessingQueueSnapshot(): ProcessingQueueSnapshot {
+		return this.autoProcessor?.getQueueSnapshot() ?? {
+			active: null,
+			pending: [],
+			totalCount: 0,
+		};
+	}
+
+	cancelProcessingQueue(): void {
 		const canceledCount = this.autoProcessor?.cancelAll() ?? 0;
 		this.hideProcessingProgress();
+		this.refreshQueueViews();
 		new Notice(canceledCount > 0
 			? translate(this.settings.language, "task.queue.canceledWithCount", { count: canceledCount })
 			: translate(this.settings.language, "task.queue.empty"));
+	}
+
+	cancelProcessingQueueItem(id: string): void {
+		const canceled = this.autoProcessor?.cancelItem(id) ?? false;
+		this.refreshQueueViews();
+		new Notice(canceled
+			? translate(this.settings.language, "task.queue.canceled")
+			: translate(this.settings.language, "task.queue.itemMissing"));
+	}
+
+	getTaskDisplayName(taskId: ProcessingTaskId): string {
+		if (taskId === ANKI_CARD_GENERATION_TASK_ID) {
+			return translate(this.settings.language, "task.ankiCardGeneration");
+		}
+
+		return translate(this.settings.language, "task.webClipperBilingualCleanup");
 	}
 
 	private addQueueToMessage(message: string): string {
@@ -348,6 +405,14 @@ export default class DocumentProcessingPlugin extends Plugin {
 		}
 
 		return `${prefix}${tokens}`;
+	}
+
+	private refreshQueueViews(): void {
+		for (const leaf of this.app.workspace.getLeavesOfType(PROCESSING_QUEUE_VIEW_TYPE)) {
+			if (leaf.view instanceof ProcessingQueueView) {
+				leaf.view.render();
+			}
+		}
 	}
 }
 

@@ -127,8 +127,8 @@ export function getTaskPrompt(task: TaskDefinition, binding: TaskBinding | null)
 	return override || task.defaultPrompt;
 }
 
-export function createQueueKey(filePath: string, contentHash: string, taskId: ProcessingTaskId = DEFAULT_PROCESSING_TASK_ID): string {
-	return `${normalizeVaultFilePath(filePath)}:${taskId}:${contentHash}`;
+export function createQueueSlotKey(filePath: string, taskId: ProcessingTaskId = DEFAULT_PROCESSING_TASK_ID): string {
+	return `${normalizeVaultFilePath(filePath)}:${taskId}`;
 }
 
 function normalizeVaultFilePath(path: string): string {
