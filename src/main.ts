@@ -19,6 +19,7 @@ import type { ProcessingQueueSnapshot } from "./tasks/auto-processor";
 import { findTaskBindingForFile, TaskBinding } from "./tasks/bindings";
 import { ProcessingResult, TaskPrepareContext } from "./tasks/types";
 import { ANKI_CARD_GENERATION_TASK_ID, findAnkiCardsSection } from "./tasks/anki-card-utils";
+import { NOTE_FORMATTING_TASK_ID } from "./tasks/note-formatting";
 import { PROCESSING_QUEUE_VIEW_TYPE, ProcessingQueueView } from "./ui/queue-view";
 import { openTextInputModal } from "./ui/text-input-modal";
 
@@ -79,6 +80,23 @@ export default class DocumentProcessingPlugin extends Plugin {
 
 				if (!checking) {
 					void this.processCurrentAnkiCards(file);
+				}
+
+				return true;
+			},
+		});
+
+		this.addCommand({
+			id: "format-current-note",
+			name: translate(this.settings.language, "command.formatCurrentNote"),
+			checkCallback: (checking) => {
+				const file = this.app.workspace.getActiveFile();
+				if (!this.isMarkdownFile(file)) {
+					return false;
+				}
+
+				if (!checking) {
+					void this.processCurrentNoteFormatting(file);
 				}
 
 				return true;
@@ -162,6 +180,12 @@ export default class DocumentProcessingPlugin extends Plugin {
 			const file = this.getActiveMarkdownFile();
 			if (file) {
 				void this.processCurrentAnkiCards(file);
+			}
+		});
+		this.addRibbonIcon("align-left", translate(this.settings.language, "command.formatCurrentNote"), () => {
+			const file = this.getActiveMarkdownFile();
+			if (file) {
+				void this.processCurrentNoteFormatting(file);
 			}
 		});
 		this.addRibbonIcon("circle-stop", translate(this.settings.language, "command.cancelProcessingQueue"), () => {
@@ -257,6 +281,35 @@ export default class DocumentProcessingPlugin extends Plugin {
 
 		try {
 			const result = await this.autoProcessor.enqueueManual(file, binding, ANKI_CARD_GENERATION_TASK_ID, context);
+			this.hideProcessingProgress();
+			if (this.settings.showCompletionNotice) {
+				new Notice(this.getSuccessMessage(result.tokenUsage));
+			}
+		} catch (error) {
+			this.hideProcessingProgress();
+			if (isProcessingCanceled(error)) {
+				new Notice(translate(this.settings.language, "task.queue.canceled"));
+				return;
+			}
+
+			const message = error instanceof Error ? error.message : String(error);
+			new Notice(translate(this.settings.language, "task.process.failure", { message }));
+		}
+	}
+
+	private async processCurrentNoteFormatting(file: TFile): Promise<void> {
+		if (!this.autoProcessor) {
+			return;
+		}
+
+		const binding = findTaskBindingForFile(
+			file.path,
+			this.settings.taskBindings.filter((item) => item.taskId === NOTE_FORMATTING_TASK_ID),
+		);
+		new Notice(translate(this.settings.language, "task.process.queued"));
+
+		try {
+			const result = await this.autoProcessor.enqueueManual(file, binding, NOTE_FORMATTING_TASK_ID);
 			this.hideProcessingProgress();
 			if (this.settings.showCompletionNotice) {
 				new Notice(this.getSuccessMessage(result.tokenUsage));
@@ -485,6 +538,10 @@ export default class DocumentProcessingPlugin extends Plugin {
 	getTaskDisplayName(taskId: ProcessingTaskId): string {
 		if (taskId === ANKI_CARD_GENERATION_TASK_ID) {
 			return translate(this.settings.language, "task.ankiCardGeneration");
+		}
+
+		if (taskId === NOTE_FORMATTING_TASK_ID) {
+			return translate(this.settings.language, "task.noteFormatting");
 		}
 
 		return translate(this.settings.language, "task.webClipperBilingualCleanup");

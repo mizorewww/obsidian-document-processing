@@ -10,6 +10,7 @@ import {
 } from "./bindings";
 import { ProcessingResult, TaskDefinition, TaskPrepareContext } from "./types";
 import { DEFAULT_PROCESSING_TASK_ID, ProcessingTaskId } from "./task-ids";
+import { NOTE_FORMATTING_TASK_ID } from "./note-formatting";
 
 export type TaskRunSource = "manual" | "auto";
 
@@ -487,6 +488,10 @@ function isMarkdownFile(file: TAbstractFile): file is TFile {
 function getTaskRunOrder(taskId: ProcessingTaskId): number {
 	if (taskId === DEFAULT_PROCESSING_TASK_ID) {
 		return 0;
+	}
+
+	if (taskId === NOTE_FORMATTING_TASK_ID) {
+		return 5;
 	}
 
 	return 10;

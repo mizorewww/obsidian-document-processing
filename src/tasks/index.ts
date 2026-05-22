@@ -1,10 +1,12 @@
 import { ProcessingTaskId } from "./task-ids";
 import { TaskDefinition } from "./types";
 import { ANKI_CARD_GENERATION_TASK } from "./anki-card-generation";
+import { NOTE_FORMATTING_TASK } from "./note-formatting";
 import { WEB_CLIPPER_BILINGUAL_CLEANUP_TASK } from "./web-clipper-bilingual-cleanup";
 
 export const TASK_DEFINITIONS: TaskDefinition[] = [
 	WEB_CLIPPER_BILINGUAL_CLEANUP_TASK,
+	NOTE_FORMATTING_TASK,
 	ANKI_CARD_GENERATION_TASK,
 ];
 

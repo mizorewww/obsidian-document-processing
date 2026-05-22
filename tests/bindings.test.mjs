@@ -93,9 +93,12 @@ test("deduplicates only currently queued auto processing keys", () => {
 
 test("auto queue slots are separate per task for the same file", () => {
 	const webKey = createQueueSlotKey("Learning/Clippings/Article.md", "web-clipper-bilingual-cleanup");
+	const formattingKey = createQueueSlotKey("Learning/Clippings/Article.md", "note-formatting");
 	const ankiKey = createQueueSlotKey("Learning/Clippings/Article.md", "anki-card-generation");
 
 	assert.notEqual(webKey, ankiKey);
+	assert.notEqual(webKey, formattingKey);
+	assert.notEqual(formattingKey, ankiKey);
 });
 
 test("auto scanning can enqueue one candidate per matching task", async () => {

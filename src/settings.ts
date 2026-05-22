@@ -22,6 +22,7 @@ import {
 import { AnkiCardLanguage, CodexAuthData, LlmConnectionCheckRecord, LlmProvider } from "./settings-data";
 import { TASK_DEFINITIONS } from "./tasks";
 import { ANKI_CARD_GENERATION_TASK_ID } from "./tasks/anki-card-utils";
+import { NOTE_FORMATTING_TASK_ID } from "./tasks/note-formatting";
 import {
 	createTaskBindingId,
 	DEFAULT_TASK_BINDING_FOLDER,
@@ -667,6 +668,10 @@ export class DocumentProcessingSettingTab extends PluginSettingTab {
 	private getTaskLabel(taskId: string): string {
 		if (taskId === "web-clipper-bilingual-cleanup") {
 			return this.t("task.webClipperBilingualCleanup");
+		}
+
+		if (taskId === NOTE_FORMATTING_TASK_ID) {
+			return this.t("task.noteFormatting");
 		}
 
 		if (taskId === "anki-card-generation") {
