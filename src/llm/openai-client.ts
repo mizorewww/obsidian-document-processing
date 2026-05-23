@@ -10,7 +10,7 @@ import {
 	usageFromApi,
 } from "./token-usage";
 
-const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
+export const DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1";
 
 interface OpenAiErrorPayload {
 	error?: {
@@ -44,8 +44,21 @@ interface OpenAiStreamPayload extends OpenAiResponsePayload {
 	};
 }
 
+interface OpenAiChatCompletionPayload extends OpenAiErrorPayload {
+	choices?: Array<{
+		message?: {
+			content?: string | Array<{
+				text?: string;
+				type?: string;
+			}>;
+		};
+	}>;
+	usage?: ApiUsagePayload;
+}
+
 export interface OpenAiTextRequest {
 	apiKey: string;
+	baseUrl?: string;
 	model: string;
 	prompt: string;
 	instructions?: string;
@@ -79,6 +92,10 @@ export async function requestOpenAiText(request: OpenAiTextRequest): Promise<Ope
 		phase: "uploading",
 	});
 
+	if (!shouldUseResponsesApi(request.baseUrl)) {
+		return requestOpenAiChatCompletionsBuffered(request, inputTokens);
+	}
+
 	if (request.onProgress && canUseFetchStreaming()) {
 		try {
 			return await requestOpenAiTextStreaming(request, inputTokens);
@@ -92,6 +109,44 @@ export async function requestOpenAiText(request: OpenAiTextRequest): Promise<Ope
 	return requestOpenAiTextBuffered(request, inputTokens);
 }
 
+async function requestOpenAiChatCompletionsBuffered(request: OpenAiTextRequest, inputTokens: number): Promise<OpenAiTextResponse> {
+	throwIfAborted(request.signal);
+	request.onProgress?.({
+		...buildEstimatedUsage(inputTokens, ""),
+		phase: "waiting",
+	});
+
+	const response = await requestUrl({
+		url: buildOpenAiApiUrl(request.baseUrl, "chat/completions"),
+		method: "POST",
+		contentType: "application/json",
+		headers: {
+			Authorization: `Bearer ${request.apiKey}`,
+		},
+		body: JSON.stringify({
+			model: request.model,
+			messages: buildChatCompletionMessages(request),
+			max_tokens: request.maxOutputTokens,
+		}),
+		throw: false,
+	});
+	throwIfAborted(request.signal);
+	const payload = response.json as OpenAiChatCompletionPayload;
+
+	if (response.status < 200 || response.status >= 300) {
+		throw new OpenAiRequestError(response.status, formatOpenAiError(response.status, payload), payload);
+	}
+
+	const text = extractChatCompletionText(payload);
+	const usage = usageFromApi(payload.usage) ?? buildEstimatedUsage(inputTokens, text);
+	request.onProgress?.(buildProgress("completed", inputTokens, text, usage));
+
+	return {
+		text,
+		usage,
+	};
+}
+
 async function requestOpenAiTextBuffered(request: OpenAiTextRequest, inputTokens: number): Promise<OpenAiTextResponse> {
 	throwIfAborted(request.signal);
 	request.onProgress?.({
@@ -100,7 +155,7 @@ async function requestOpenAiTextBuffered(request: OpenAiTextRequest, inputTokens
 	});
 
 	const response = await requestUrl({
-		url: OPENAI_RESPONSES_URL,
+		url: buildOpenAiApiUrl(request.baseUrl, "responses"),
 		method: "POST",
 		contentType: "application/json",
 		headers: {
@@ -135,7 +190,7 @@ async function requestOpenAiTextBuffered(request: OpenAiTextRequest, inputTokens
 async function requestOpenAiTextStreaming(request: OpenAiTextRequest, inputTokens: number): Promise<OpenAiTextResponse> {
 	let response: Response;
 	try {
-		response = await globalThis.fetch(OPENAI_RESPONSES_URL, {
+		response = await globalThis.fetch(buildOpenAiApiUrl(request.baseUrl, "responses"), {
 			method: "POST",
 			headers: {
 				Accept: "text/event-stream",
@@ -207,6 +262,48 @@ async function requestOpenAiTextStreaming(request: OpenAiTextRequest, inputToken
 	};
 }
 
+export function normalizeOpenAiBaseUrl(value: string | undefined): string {
+	const rawValue = value?.trim() || DEFAULT_OPENAI_BASE_URL;
+	const withProtocol = /^[a-z][a-z0-9+.-]*:\/\//iu.test(rawValue)
+		? rawValue
+		: `https://${rawValue}`;
+	const url = new URL(withProtocol);
+	url.hash = "";
+	url.search = "";
+
+	const pathParts = url.pathname.split("/").filter(Boolean);
+	const lastPart = pathParts[pathParts.length - 1];
+	if (lastPart === "responses" || lastPart === "models" || lastPart === "completions") {
+		pathParts.pop();
+	}
+
+	if (pathParts[pathParts.length - 1] === "chat") {
+		pathParts.pop();
+	}
+
+	url.pathname = pathParts.length ? `/${pathParts.join("/")}` : "";
+	return url.toString().replace(/\/$/u, "");
+}
+
+export function buildOpenAiApiUrl(baseUrl: string | undefined, path: string): string {
+	const normalizedBaseUrl = normalizeOpenAiBaseUrl(baseUrl);
+	return `${normalizedBaseUrl}/${path.replace(/^\/+/u, "")}`;
+}
+
+export function shouldUseResponsesApi(baseUrl: string | undefined): boolean {
+	return normalizeOpenAiBaseUrl(baseUrl) === DEFAULT_OPENAI_BASE_URL;
+}
+
+function buildChatCompletionMessages(request: OpenAiTextRequest): Array<{ role: "system" | "user"; content: string }> {
+	const messages: Array<{ role: "system" | "user"; content: string }> = [];
+	if (request.instructions?.trim()) {
+		messages.push({ role: "system", content: request.instructions.trim() });
+	}
+
+	messages.push({ role: "user", content: request.prompt });
+	return messages;
+}
+
 function throwIfAborted(signal: AbortSignal | undefined): void {
 	if (signal?.aborted) {
 		throw new Error("Processing queue canceled.");
@@ -234,6 +331,25 @@ function extractOpenAiOutputText(payload: OpenAiResponsePayload): string {
 		for (const content of item.content ?? []) {
 			if (typeof content.text === "string") {
 				outputParts.push(content.text);
+			}
+		}
+	}
+
+	return outputParts.join("\n");
+}
+
+function extractChatCompletionText(payload: OpenAiChatCompletionPayload): string {
+	const outputParts: string[] = [];
+	for (const choice of payload.choices ?? []) {
+		const content = choice.message?.content;
+		if (typeof content === "string") {
+			outputParts.push(content);
+			continue;
+		}
+
+		for (const part of content ?? []) {
+			if (typeof part.text === "string") {
+				outputParts.push(part.text);
 			}
 		}
 	}

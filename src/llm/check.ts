@@ -1,4 +1,3 @@
-import { requestUrl } from "obsidian";
 import {
 	getValidCodexAuth,
 	refreshCodexAuth,
@@ -6,8 +5,8 @@ import {
 import { CodexRequestError, requestCodexText } from "./codex-client";
 import { DocumentProcessingSettings } from "../settings-data";
 import { translate } from "../i18n";
+import { OpenAiRequestError, requestOpenAiText } from "./openai-client";
 
-const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
 const TEST_PROMPT = "Reply with exactly: ok";
 
 export interface LlmCheckResult {
@@ -17,25 +16,6 @@ export interface LlmCheckResult {
 	message: string;
 	latencyMs: number;
 	output: string;
-}
-
-interface OpenAiErrorPayload {
-	error?: {
-		message?: string;
-		type?: string;
-		code?: string;
-	};
-}
-
-interface OpenAiResponsePayload extends OpenAiErrorPayload {
-	output_text?: string;
-	output?: Array<{
-		content?: Array<{
-			text?: string;
-			type?: string;
-		}>;
-		type?: string;
-	}>;
 }
 
 export async function checkLlmConnection(
@@ -62,30 +42,22 @@ async function checkOpenAiApi(settings: DocumentProcessingSettings): Promise<Llm
 	}
 
 	const startedAt = Date.now();
-	const response = await requestUrl({
-		url: OPENAI_RESPONSES_URL,
-		method: "POST",
-		contentType: "application/json",
-		headers: {
-			Authorization: `Bearer ${apiKey}`,
-		},
-		body: JSON.stringify({
+	try {
+		const response = await requestOpenAiText({
+			apiKey,
+			baseUrl: settings.openaiBaseUrl,
 			model,
-			input: TEST_PROMPT,
-			max_output_tokens: 16,
-			store: false,
-		}),
-		throw: false,
-	});
-	const latencyMs = Date.now() - startedAt;
-	const payload = response.json as OpenAiResponsePayload;
+			prompt: TEST_PROMPT,
+			maxOutputTokens: 16,
+		});
+		return buildResult(translate(settings.language, "provider.openaiApi"), model, response.text, Date.now() - startedAt, settings);
+	} catch (error) {
+		if (error instanceof OpenAiRequestError) {
+			throw new Error(formatOpenAiError(error.status, error.payload, settings));
+		}
 
-	if (response.status < 200 || response.status >= 300) {
-		throw new Error(formatOpenAiError(response.status, payload, settings));
+		throw error;
 	}
-
-	const output = extractOpenAiOutputText(payload);
-	return buildResult(translate(settings.language, "provider.openaiApi"), model, output, latencyMs, settings);
 }
 
 async function checkCodexLogin(
@@ -148,28 +120,11 @@ function cleanCodexRequestMessage(message: string): string {
 	return message.replace(/^Codex request failed with HTTP \d+:\s*/u, "");
 }
 
-function formatOpenAiError(status: number, payload: OpenAiResponsePayload, settings: DocumentProcessingSettings): string {
+function formatOpenAiError(status: number, payload: { error?: { message?: string; code?: string } }, settings: DocumentProcessingSettings): string {
 	const error = payload.error;
 	const message = error?.message ?? translate(settings.language, "check.error.openAiDefault");
 	const code = error?.code ? ` (${error.code})` : "";
 	return translate(settings.language, "check.error.openAiHttp", { status, code, message });
-}
-
-function extractOpenAiOutputText(payload: OpenAiResponsePayload): string {
-	if (typeof payload.output_text === "string") {
-		return payload.output_text;
-	}
-
-	const outputParts: string[] = [];
-	for (const item of payload.output ?? []) {
-		for (const content of item.content ?? []) {
-			if (typeof content.text === "string") {
-				outputParts.push(content.text);
-			}
-		}
-	}
-
-	return outputParts.join("\n");
 }
 
 function buildResult(

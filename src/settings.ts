@@ -2,6 +2,8 @@ import { App, Modal, Notice, PluginSettingTab, Setting } from "obsidian";
 import type DocumentProcessingPlugin from "./main";
 import { translate, LanguageSetting, resolveLanguage } from "./i18n";
 import { checkLlmConnection } from "./llm/check";
+import { fetchOpenAiModels } from "./llm/openai-models";
+import { normalizeOpenAiBaseUrl } from "./llm/openai-client";
 import {
 	CODEX_DEVICE_VERIFICATION_URL,
 	completeCodexDeviceLogin,
@@ -39,6 +41,7 @@ const ANKI_CARD_LANGUAGES: AnkiCardLanguage[] = ["zh-CN", "en", "match-note"];
 export class DocumentProcessingSettingTab extends PluginSettingTab {
 	plugin: DocumentProcessingPlugin;
 	private loginAbortController: AbortController | null = null;
+	private lastOpenAiModelRefreshKey: string | null = null;
 
 	constructor(app: App, plugin: DocumentProcessingPlugin) {
 		super(app, plugin);
@@ -54,6 +57,7 @@ export class DocumentProcessingSettingTab extends PluginSettingTab {
 		this.addModelSection(containerEl);
 		this.addProcessingSection(containerEl);
 		this.addCheckSection(containerEl);
+		this.refreshOpenAiModelsIfNeeded();
 	}
 
 	private addGeneralSection(containerEl: HTMLElement): void {
@@ -123,6 +127,35 @@ export class DocumentProcessingSettingTab extends PluginSettingTab {
 						await this.plugin.saveSettings();
 					});
 			});
+
+		new Setting(sectionEl)
+			.setName(this.t("api.endpoint.name"))
+			.setDesc(this.t("api.endpoint.desc"))
+			.addText((text) => {
+				text
+					.setPlaceholder(this.t("api.endpoint.placeholder"))
+					.setValue(this.plugin.settings.openaiBaseUrl)
+					.onChange(async (value) => {
+						this.plugin.settings.openaiBaseUrl = value.trim();
+						this.plugin.settings.openaiAvailableModels = [];
+						await this.plugin.saveSettings();
+					});
+				text.inputEl.addEventListener("blur", () => {
+					try {
+						this.plugin.settings.openaiBaseUrl = normalizeOpenAiBaseUrl(this.plugin.settings.openaiBaseUrl);
+						void this.plugin.saveSettings().then(() => this.refreshOpenAiModels(true));
+					} catch (error) {
+						const message = error instanceof Error ? error.message : this.t("model.refresh.failed");
+						new Notice(message);
+					}
+				});
+			})
+			.addExtraButton((button) => button
+				.setIcon("refresh-cw")
+				.setTooltip(this.t("model.refresh.tooltip"))
+				.onClick(() => {
+					void this.refreshOpenAiModels(true);
+				}));
 	}
 
 	private addCodexAccountSection(containerEl: HTMLElement): void {
@@ -211,7 +244,7 @@ export class DocumentProcessingSettingTab extends PluginSettingTab {
 
 	private addModelSection(containerEl: HTMLElement): void {
 		const sectionEl = this.addSection(containerEl, this.t("section.model"));
-		const options = this.plugin.settings.llmProvider === "codex-login" ? CODEX_MODELS : OPENAI_API_MODELS;
+		const options = this.plugin.settings.llmProvider === "codex-login" ? CODEX_MODELS : this.getOpenAiModelOptions();
 
 		this.addModelSetting({
 			containerEl: sectionEl,
@@ -242,7 +275,7 @@ export class DocumentProcessingSettingTab extends PluginSettingTab {
 
 		new Setting(config.containerEl)
 			.setName(this.t("model.name"))
-			.setDesc(this.t("model.desc"))
+			.setDesc(this.getModelSettingDescription())
 			.addDropdown((dropdown) => {
 				for (const option of config.options) {
 					dropdown.addOption(option.id, option.name);
@@ -582,6 +615,74 @@ export class DocumentProcessingSettingTab extends PluginSettingTab {
 		return this.plugin.settings.llmProvider === "codex-login"
 			? this.plugin.settings.codexModel
 			: this.plugin.settings.openaiModel;
+	}
+
+	private getOpenAiModelOptions(): ModelOption[] {
+		const remoteModels = this.plugin.settings.openaiAvailableModels;
+		if (!remoteModels.length) {
+			return OPENAI_API_MODELS;
+		}
+
+		return remoteModels.map((id) => ({
+			id,
+			name: id,
+			description: this.t("model.remoteDescription"),
+		}));
+	}
+
+	private getModelSettingDescription(): string {
+		if (this.plugin.settings.llmProvider === "codex-login") {
+			return this.t("model.desc");
+		}
+
+		const count = this.plugin.settings.openaiAvailableModels.length;
+		return count ? this.t("model.remote.desc", { count }) : this.t("model.desc");
+	}
+
+	private refreshOpenAiModelsIfNeeded(): void {
+		const refreshKey = this.getOpenAiModelRefreshKey();
+		if (
+			this.plugin.settings.llmProvider !== "openai-api"
+			|| !this.plugin.settings.openaiApiKey.trim()
+			|| this.plugin.settings.openaiAvailableModels.length
+			|| this.lastOpenAiModelRefreshKey === refreshKey
+		) {
+			return;
+		}
+
+		void this.refreshOpenAiModels(false);
+	}
+
+	private async refreshOpenAiModels(showNotice: boolean): Promise<void> {
+		const apiKey = this.plugin.settings.openaiApiKey.trim();
+		if (this.plugin.settings.llmProvider !== "openai-api" || !apiKey) {
+			if (showNotice) {
+				new Notice(this.t("check.error.missingApiKey"));
+			}
+			return;
+		}
+
+		try {
+			this.lastOpenAiModelRefreshKey = this.getOpenAiModelRefreshKey();
+			const models = await fetchOpenAiModels(apiKey, this.plugin.settings.openaiBaseUrl);
+			this.plugin.settings.openaiBaseUrl = normalizeOpenAiBaseUrl(this.plugin.settings.openaiBaseUrl);
+			this.plugin.settings.openaiAvailableModels = models;
+			await this.plugin.saveSettings();
+			if (showNotice) {
+				new Notice(this.t("model.refresh.done", { count: models.length }));
+			}
+			this.display();
+		} catch (error) {
+			console.error("Document Processing model refresh failed", error);
+			if (showNotice) {
+				const message = error instanceof Error ? error.message : this.t("model.refresh.failed");
+				new Notice(message);
+			}
+		}
+	}
+
+	private getOpenAiModelRefreshKey(): string {
+		return `${this.plugin.settings.openaiBaseUrl.trim()}::${this.plugin.settings.openaiApiKey.trim()}`;
 	}
 
 	private getLastCheckSummary(): string {

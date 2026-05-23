@@ -46,6 +46,7 @@ async function requestOpenAiApiText(request: LlmTextRequest): Promise<LlmTextRes
 
 	const response = await requestOpenAiText({
 		apiKey,
+		baseUrl: request.settings.openaiBaseUrl,
 		model,
 		instructions: request.instructions,
 		prompt: request.prompt,

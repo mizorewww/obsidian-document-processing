@@ -29,7 +29,9 @@ export interface DocumentProcessingSettings {
 	language: LanguageSetting;
 	llmProvider: LlmProvider;
 	openaiApiKey: string;
+	openaiBaseUrl: string;
 	openaiModel: string;
+	openaiAvailableModels: string[];
 	codexModel: string;
 	codexReasoningEffort: CodexReasoningEffort;
 	codexServiceTier: CodexServiceTier;
@@ -45,7 +47,9 @@ export const DEFAULT_SETTINGS: DocumentProcessingSettings = {
 	language: "auto",
 	llmProvider: "openai-api",
 	openaiApiKey: "",
+	openaiBaseUrl: "https://api.openai.com/v1",
 	openaiModel: "gpt-5.4-mini",
+	openaiAvailableModels: [],
 	codexModel: "gpt-5.4-mini",
 	codexReasoningEffort: "medium",
 	codexServiceTier: "default",
@@ -68,6 +72,18 @@ export function normalizeSettings(data: Partial<DocumentProcessingSettings> | nu
 	if (!isLanguageSetting(settings.language)) {
 		settings.language = DEFAULT_SETTINGS.language;
 	}
+
+	if (typeof settings.openaiBaseUrl !== "string" || !settings.openaiBaseUrl.trim()) {
+		settings.openaiBaseUrl = DEFAULT_SETTINGS.openaiBaseUrl;
+	}
+
+	if (!Array.isArray(settings.openaiAvailableModels)) {
+		settings.openaiAvailableModels = [];
+	}
+
+	settings.openaiAvailableModels = settings.openaiAvailableModels
+		.filter((model): model is string => typeof model === "string" && Boolean(model.trim()))
+		.map((model) => model.trim());
 
 	if (!isCodexReasoningEffort(settings.codexReasoningEffort)) {
 		settings.codexReasoningEffort = DEFAULT_SETTINGS.codexReasoningEffort;

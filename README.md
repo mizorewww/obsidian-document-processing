@@ -6,7 +6,8 @@ An Obsidian plugin for processing notes and documents with configurable model se
 
 - Use an OpenAI API key.
 - Sign in with an OpenAI account.
-- Select a preset model or type a custom model ID.
+- Use the default OpenAI API endpoint or an OpenAI-compatible custom endpoint.
+- Load available models from the configured API endpoint, select a model, or type a custom model ID.
 - Choose intelligence and speed preferences when using OpenAI account sign-in.
 - Process the current Web Clipper note into cleaner Markdown, using bilingual output only when the source is mostly non-Chinese.
 - Create or update Anki cards in a note's `# Cards` section for the `obsidian_anki_sync` plugin.
@@ -26,10 +27,12 @@ An Obsidian plugin for processing notes and documents with configurable model se
 1. Open **Settings -> Community plugins -> Document Processing**.
 2. Select **OpenAI API key**.
 3. Enter your OpenAI API key.
-4. Select a model.
-5. Select **Check**.
+4. Keep the default API endpoint or enter an OpenAI-compatible endpoint.
+5. Select a model from the loaded list or type a custom model ID.
+6. Select **Check**.
 
 The API key is stored in this plugin's local Obsidian data.
+Custom endpoints are called through the OpenAI-compatible Chat Completions API.
 
 ### OpenAI account
 
