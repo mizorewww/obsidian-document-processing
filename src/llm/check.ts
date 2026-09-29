@@ -3,6 +3,7 @@ import {
 	refreshCodexAuth,
 } from "./codex-auth";
 import { CodexRequestError, requestCodexText } from "./codex-client";
+import { OLLAMA_CLOUD_BASE_URL } from "./ollama-cloud";
 import { DocumentProcessingSettings } from "../settings-data";
 import { translate } from "../i18n";
 import { OpenAiRequestError, requestOpenAiText } from "./openai-client";
@@ -26,31 +27,61 @@ export async function checkLlmConnection(
 		return checkCodexLogin(settings, saveSettings);
 	}
 
-	return checkOpenAiApi(settings);
+	if (settings.llmProvider === "ollama-cloud") {
+		return checkApiKeyProvider(settings, {
+			apiKey: settings.ollamaApiKey,
+			baseUrl: OLLAMA_CLOUD_BASE_URL,
+			model: settings.ollamaModel,
+			providerLabel: translate(settings.language, "provider.ollamaCloud"),
+			missingKeyError: translate(settings.language, "check.error.missingOllamaKey"),
+			missingModelError: translate(settings.language, "check.error.missingOllamaModel"),
+			maxOutputTokens: 256,
+		});
+	}
+
+	return checkApiKeyProvider(settings, {
+		apiKey: settings.openaiApiKey,
+		baseUrl: settings.openaiBaseUrl,
+		model: settings.openaiModel,
+		providerLabel: translate(settings.language, "provider.openaiApi"),
+		missingKeyError: translate(settings.language, "check.error.missingApiKey"),
+		missingModelError: translate(settings.language, "check.error.missingOpenAiModel"),
+		maxOutputTokens: 16,
+	});
 }
 
-async function checkOpenAiApi(settings: DocumentProcessingSettings): Promise<LlmCheckResult> {
-	const apiKey = settings.openaiApiKey.trim();
-	const model = settings.openaiModel.trim();
+interface ApiKeyCheckConfig {
+	apiKey: string;
+	baseUrl: string;
+	model: string;
+	providerLabel: string;
+	missingKeyError: string;
+	missingModelError: string;
+	maxOutputTokens: number;
+}
+
+async function checkApiKeyProvider(settings: DocumentProcessingSettings, config: ApiKeyCheckConfig): Promise<LlmCheckResult> {
+	const apiKey = config.apiKey.trim();
+	const model = config.model.trim();
 
 	if (!apiKey) {
-		throw new Error(translate(settings.language, "check.error.missingApiKey"));
+		throw new Error(config.missingKeyError);
 	}
 
 	if (!model) {
-		throw new Error(translate(settings.language, "check.error.missingOpenAiModel"));
+		throw new Error(config.missingModelError);
 	}
 
 	const startedAt = Date.now();
 	try {
 		const response = await requestOpenAiText({
 			apiKey,
-			baseUrl: settings.openaiBaseUrl,
+			baseUrl: config.baseUrl,
 			model,
 			prompt: TEST_PROMPT,
-			maxOutputTokens: 16,
+			maxOutputTokens: config.maxOutputTokens,
 		});
-		return buildResult(translate(settings.language, "provider.openaiApi"), model, response.text, Date.now() - startedAt, settings);
+		return buildResult(config.providerLabel, model, response.text, Date.now() - startedAt, settings);
 	} catch (error) {
 		if (error instanceof OpenAiRequestError) {
 			throw new Error(formatOpenAiError(error.status, error.payload, settings));

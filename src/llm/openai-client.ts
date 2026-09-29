@@ -1,4 +1,6 @@
 import { requestUrl } from "obsidian";
+import { isAbortError, LLM_CANCELED_MESSAGE, throwIfAborted } from "./abort";
+import { extractResponsesOutputText, ResponsesOutputPayload } from "./responses-payload";
 import { canUseFetchStreaming, readFetchSseStream, StreamingUnavailableError } from "./sse";
 import {
 	ApiUsagePayload,
@@ -20,17 +22,7 @@ interface OpenAiErrorPayload {
 	};
 }
 
-interface OpenAiResponsePayload extends OpenAiErrorPayload {
-	output_text?: string;
-	output?: Array<{
-		content?: Array<{
-			text?: string;
-			type?: string;
-		}>;
-		type?: string;
-	}>;
-	usage?: ApiUsagePayload;
-}
+type OpenAiResponsePayload = OpenAiErrorPayload & ResponsesOutputPayload;
 
 interface OpenAiStreamPayload extends OpenAiResponsePayload {
 	type?: string;
@@ -177,7 +169,7 @@ async function requestOpenAiTextBuffered(request: OpenAiTextRequest, inputTokens
 		throw new OpenAiRequestError(response.status, formatOpenAiError(response.status, payload), payload);
 	}
 
-	const text = extractOpenAiOutputText(payload);
+	const text = extractResponsesOutputText(payload);
 	const usage = usageFromApi(payload.usage) ?? buildEstimatedUsage(inputTokens, text);
 	request.onProgress?.(buildProgress("completed", inputTokens, text, usage));
 
@@ -209,7 +201,7 @@ async function requestOpenAiTextStreaming(request: OpenAiTextRequest, inputToken
 		});
 	} catch (error) {
 		if (isAbortError(error) || request.signal?.aborted) {
-			throw new Error("Processing queue canceled.");
+			throw new Error(LLM_CANCELED_MESSAGE);
 		}
 
 		throw new StreamingUnavailableError(error instanceof Error ? error.message : "Streaming request failed.");
@@ -243,7 +235,7 @@ async function requestOpenAiTextStreaming(request: OpenAiTextRequest, inputToken
 			request.onProgress?.(buildProgress("streaming", inputTokens, streamedText));
 		}
 
-		const responseText = payload.response ? extractOpenAiOutputText(payload.response) : "";
+		const responseText = payload.response ? extractResponsesOutputText(payload.response) : "";
 		if (responseText) {
 			completedText = responseText;
 		}
@@ -304,38 +296,10 @@ function buildChatCompletionMessages(request: OpenAiTextRequest): Array<{ role: 
 	return messages;
 }
 
-function throwIfAborted(signal: AbortSignal | undefined): void {
-	if (signal?.aborted) {
-		throw new Error("Processing queue canceled.");
-	}
-}
-
-function isAbortError(error: unknown): boolean {
-	return error instanceof DOMException && error.name === "AbortError"
-		|| error instanceof Error && error.name === "AbortError";
-}
-
-function formatOpenAiError(status: number, payload: OpenAiResponsePayload): string {
+function formatOpenAiError(status: number, payload: OpenAiErrorPayload): string {
 	const message = payload.error?.message ?? "The OpenAI API returned an error.";
 	const code = payload.error?.code ? ` (${payload.error.code})` : "";
 	return `OpenAI API request failed with HTTP ${status}${code}: ${message}`;
-}
-
-function extractOpenAiOutputText(payload: OpenAiResponsePayload): string {
-	if (typeof payload.output_text === "string") {
-		return payload.output_text;
-	}
-
-	const outputParts: string[] = [];
-	for (const item of payload.output ?? []) {
-		for (const content of item.content ?? []) {
-			if (typeof content.text === "string") {
-				outputParts.push(content.text);
-			}
-		}
-	}
-
-	return outputParts.join("\n");
 }
 
 function extractChatCompletionText(payload: OpenAiChatCompletionPayload): string {

@@ -2,7 +2,7 @@ import { CodexReasoningEffort, CodexServiceTier } from "./llm/models";
 import { isLanguageSetting, LanguageSetting } from "./i18n";
 import { DEFAULT_TASK_BINDINGS, normalizeTaskBindings, TaskBinding } from "./tasks/bindings";
 
-export type LlmProvider = "openai-api" | "codex-login";
+export type LlmProvider = "openai-api" | "codex-login" | "ollama-cloud";
 export type AnkiCardLanguage = "zh-CN" | "en" | "match-note";
 
 export interface CodexAuthData {
@@ -32,6 +32,9 @@ export interface DocumentProcessingSettings {
 	openaiBaseUrl: string;
 	openaiModel: string;
 	openaiAvailableModels: string[];
+	ollamaApiKey: string;
+	ollamaModel: string;
+	ollamaAvailableModels: string[];
 	codexModel: string;
 	codexReasoningEffort: CodexReasoningEffort;
 	codexServiceTier: CodexServiceTier;
@@ -50,6 +53,9 @@ export const DEFAULT_SETTINGS: DocumentProcessingSettings = {
 	openaiBaseUrl: "https://api.openai.com/v1",
 	openaiModel: "gpt-5.4-mini",
 	openaiAvailableModels: [],
+	ollamaApiKey: "",
+	ollamaModel: "gpt-oss:120b",
+	ollamaAvailableModels: [],
 	codexModel: "gpt-5.4-mini",
 	codexReasoningEffort: "medium",
 	codexServiceTier: "default",
@@ -69,6 +75,10 @@ export function normalizeSettings(data: Partial<DocumentProcessingSettings> | nu
 		settings.llmProvider = "codex-login";
 	}
 
+	if (!isLlmProvider(settings.llmProvider)) {
+		settings.llmProvider = DEFAULT_SETTINGS.llmProvider;
+	}
+
 	if (!isLanguageSetting(settings.language)) {
 		settings.language = DEFAULT_SETTINGS.language;
 	}
@@ -82,6 +92,22 @@ export function normalizeSettings(data: Partial<DocumentProcessingSettings> | nu
 	}
 
 	settings.openaiAvailableModels = settings.openaiAvailableModels
+		.filter((model): model is string => typeof model === "string" && Boolean(model.trim()))
+		.map((model) => model.trim());
+
+	if (typeof settings.ollamaApiKey !== "string") {
+		settings.ollamaApiKey = "";
+	}
+
+	if (typeof settings.ollamaModel !== "string" || !settings.ollamaModel.trim()) {
+		settings.ollamaModel = DEFAULT_SETTINGS.ollamaModel;
+	}
+
+	if (!Array.isArray(settings.ollamaAvailableModels)) {
+		settings.ollamaAvailableModels = [];
+	}
+
+	settings.ollamaAvailableModels = settings.ollamaAvailableModels
 		.filter((model): model is string => typeof model === "string" && Boolean(model.trim()))
 		.map((model) => model.trim());
 
@@ -108,6 +134,10 @@ export function normalizeSettings(data: Partial<DocumentProcessingSettings> | nu
 	settings.showCompletionNotice = settings.showCompletionNotice === true;
 
 	return settings;
+}
+
+function isLlmProvider(value: unknown): value is LlmProvider {
+	return value === "openai-api" || value === "codex-login" || value === "ollama-cloud";
 }
 
 function isCodexReasoningEffort(value: unknown): value is CodexReasoningEffort {

@@ -1,8 +1,10 @@
 import { requestUrl } from "obsidian";
 import { CodexAuthData } from "../settings-data";
+import { isAbortError, LLM_CANCELED_MESSAGE, throwIfAborted } from "./abort";
 import { CodexReasoningEffort, CodexServiceTier } from "./models";
 import { CODEX_ORIGINATOR, CODEX_RESPONSES_URL, CODEX_VERSION, getCodexUserAgent } from "./codex-auth";
 import { canUseFetchStreaming, readFetchSseStream, StreamingUnavailableError } from "./sse";
+import { extractResponsesOutputText, ResponsesOutputPayload } from "./responses-payload";
 import {
 	ApiUsagePayload,
 	buildEstimatedUsage,
@@ -12,18 +14,6 @@ import {
 	LlmTokenUsage,
 	usageFromApi,
 } from "./token-usage";
-
-interface OpenAiResponsePayload {
-	output_text?: string;
-	output?: Array<{
-		content?: Array<{
-			text?: string;
-			type?: string;
-		}>;
-		type?: string;
-	}>;
-	usage?: ApiUsagePayload;
-}
 
 interface CodexErrorPayload {
 	detail?: string;
@@ -44,7 +34,7 @@ interface CodexSsePayload {
 			type?: string;
 		}>;
 	};
-	response?: OpenAiResponsePayload;
+	response?: ResponsesOutputPayload;
 }
 
 export interface CodexRequestOptions {
@@ -160,7 +150,7 @@ async function requestCodexTextStreaming(
 		});
 	} catch (error) {
 		if (isAbortError(error) || options.signal?.aborted) {
-			throw new Error("Processing queue canceled.");
+			throw new Error(LLM_CANCELED_MESSAGE);
 		}
 
 		throw new StreamingUnavailableError(error instanceof Error ? error.message : "Streaming request failed.");
@@ -213,7 +203,7 @@ function extractCodexSseOutput(
 				completedItems.push(itemText);
 			}
 
-			const responseText = payload.response ? extractOpenAiOutputText(payload.response) : "";
+			const responseText = payload.response ? extractResponsesOutputText(payload.response) : "";
 			if (responseText) {
 				completedItems.push(responseText);
 			}
@@ -257,7 +247,7 @@ async function readCodexStream(
 			completedText = itemText;
 		}
 
-		const responseText = payload.response ? extractOpenAiOutputText(payload.response) : "";
+		const responseText = payload.response ? extractResponsesOutputText(payload.response) : "";
 		if (responseText) {
 			completedText = responseText;
 		}
@@ -276,40 +266,12 @@ async function readCodexStream(
 	};
 }
 
-function throwIfAborted(signal: AbortSignal | undefined): void {
-	if (signal?.aborted) {
-		throw new Error("Processing queue canceled.");
-	}
-}
-
-function isAbortError(error: unknown): boolean {
-	return error instanceof DOMException && error.name === "AbortError"
-		|| error instanceof Error && error.name === "AbortError";
-}
-
 function extractOutputItemText(payload: CodexSsePayload): string {
 	const outputParts: string[] = [];
 
 	for (const content of payload.item?.content ?? []) {
 		if (typeof content.text === "string") {
 			outputParts.push(content.text);
-		}
-	}
-
-	return outputParts.join("\n");
-}
-
-function extractOpenAiOutputText(payload: OpenAiResponsePayload): string {
-	if (typeof payload.output_text === "string") {
-		return payload.output_text;
-	}
-
-	const outputParts: string[] = [];
-	for (const item of payload.output ?? []) {
-		for (const content of item.content ?? []) {
-			if (typeof content.text === "string") {
-				outputParts.push(content.text);
-			}
 		}
 	}
 

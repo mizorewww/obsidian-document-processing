@@ -1,7 +1,7 @@
 import { buildMarkdownWithFrontmatter } from "../markdown/frontmatter";
+import { parseLlmJsonObject, normalizeChangeSummary } from "./llm-output";
+import { NOTE_FORMATTING_TASK_ID } from "./task-ids";
 import { TaskDefinition, TaskInput, TaskOutput, TaskPrepareOptions } from "./types";
-
-export const NOTE_FORMATTING_TASK_ID = "note-formatting";
 
 export interface NoteFormattingLlmResult {
 	markdown: string;
@@ -89,7 +89,7 @@ export function buildNoteFormattingPrompt(input: {
 }
 
 export function parseNoteFormattingLlmResult(rawText: string): NoteFormattingLlmResult {
-	const payload = parseJsonObject(rawText) as {
+	const payload = parseLlmJsonObject(rawText) as {
 		markdown?: unknown;
 		changeSummary?: unknown;
 	};
@@ -123,36 +123,4 @@ function validateFormattedMarkdown(markdown: string): void {
 	}
 }
 
-function normalizeChangeSummary(value: unknown): string[] {
-	if (!Array.isArray(value)) {
-		return [];
-	}
 
-	return value
-		.filter((item): item is string => typeof item === "string")
-		.map((item) => item.trim())
-		.filter(Boolean)
-		.slice(0, 8);
-}
-
-function parseJsonObject(rawText: string): unknown {
-	const trimmed = rawText.trim();
-	const unwrapped = unwrapCodeFence(trimmed);
-
-	try {
-		return JSON.parse(unwrapped);
-	} catch {
-		const start = unwrapped.indexOf("{");
-		const end = unwrapped.lastIndexOf("}");
-		if (start < 0 || end <= start) {
-			throw new Error("LLM output is not valid JSON.");
-		}
-
-		return JSON.parse(unwrapped.slice(start, end + 1));
-	}
-}
-
-function unwrapCodeFence(value: string): string {
-	const fenceMatch = /^```(?:json)?\s*([\s\S]*?)\s*```$/iu.exec(value);
-	return fenceMatch?.[1] ?? value;
-}

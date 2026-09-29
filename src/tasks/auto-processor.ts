@@ -9,8 +9,7 @@ import {
 	TaskBinding,
 } from "./bindings";
 import { ProcessingResult, TaskDefinition, TaskPrepareContext } from "./types";
-import { DEFAULT_PROCESSING_TASK_ID, ProcessingTaskId } from "./task-ids";
-import { NOTE_FORMATTING_TASK_ID } from "./note-formatting";
+import { DEFAULT_PROCESSING_TASK_ID, NOTE_FORMATTING_TASK_ID, ProcessingTaskId } from "./task-ids";
 
 export type TaskRunSource = "manual" | "auto";
 

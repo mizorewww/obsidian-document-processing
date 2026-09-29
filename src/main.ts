@@ -11,15 +11,16 @@ import { DocumentProcessingSettings, normalizeSettings } from "./settings-data";
 import { DocumentProcessingSettingTab } from "./settings";
 import { translate } from "./i18n";
 import { getTaskDefinition } from "./tasks";
-import { DEFAULT_PROCESSING_TASK_ID, ProcessingTaskId } from "./tasks/task-ids";
+import { ANKI_CARD_GENERATION_TASK_ID, DEFAULT_PROCESSING_TASK_ID, NOTE_FORMATTING_TASK_ID, ProcessingTaskId } from "./tasks/task-ids";
 import { TaskRunner } from "./tasks/runner";
 import { LlmProgressUpdate, LlmTokenUsage } from "./llm/token-usage";
 import { AutoProcessor, AutoQueueState, ProcessingCanceledError, TaskRunSource } from "./tasks/auto-processor";
 import type { ProcessingQueueSnapshot } from "./tasks/auto-processor";
 import { findTaskBindingForFile, TaskBinding } from "./tasks/bindings";
 import { ProcessingResult, TaskPrepareContext } from "./tasks/types";
-import { ANKI_CARD_GENERATION_TASK_ID, findAnkiCardsSection } from "./tasks/anki-card-utils";
-import { NOTE_FORMATTING_TASK_ID } from "./tasks/note-formatting";
+import { findAnkiCardsSection } from "./tasks/anki-card-utils";
+import { getTaskDisplayName } from "./tasks/labels";
+import { isAbortError } from "./llm/abort";
 import { PROCESSING_QUEUE_VIEW_TYPE, ProcessingQueueView } from "./ui/queue-view";
 import { openTextInputModal } from "./ui/text-input-modal";
 
@@ -232,43 +233,10 @@ export default class DocumentProcessingPlugin extends Plugin {
 	}
 
 	private async processCurrentClipping(file: TFile): Promise<void> {
-		if (!this.autoProcessor) {
-			return;
-		}
-
-		const binding = findTaskBindingForFile(
-			file.path,
-			this.settings.taskBindings.filter((item) => item.taskId === DEFAULT_PROCESSING_TASK_ID),
-		);
-		new Notice(translate(this.settings.language, "task.process.queued"));
-
-		try {
-			const result = await this.autoProcessor.enqueueManual(file, binding);
-			this.hideProcessingProgress();
-			if (this.settings.showCompletionNotice) {
-				new Notice(this.getSuccessMessage(result.tokenUsage));
-			}
-		} catch (error) {
-			this.hideProcessingProgress();
-			if (isProcessingCanceled(error)) {
-				new Notice(translate(this.settings.language, "task.queue.canceled"));
-				return;
-			}
-
-			const message = error instanceof Error ? error.message : String(error);
-			new Notice(translate(this.settings.language, "task.process.failure", { message }));
-		}
+		await this.processCurrentTask(file, DEFAULT_PROCESSING_TASK_ID);
 	}
 
 	private async processCurrentAnkiCards(file: TFile): Promise<void> {
-		if (!this.autoProcessor) {
-			return;
-		}
-
-		const binding = findTaskBindingForFile(
-			file.path,
-			this.settings.taskBindings.filter((item) => item.taskId === ANKI_CARD_GENERATION_TASK_ID),
-		);
 		const revisionInstructions = await this.requestAnkiRevisionInstructions(file);
 		if (revisionInstructions === null) {
 			return;
@@ -277,39 +245,26 @@ export default class DocumentProcessingPlugin extends Plugin {
 		const context: TaskPrepareContext | undefined = revisionInstructions === undefined
 			? undefined
 			: { ankiRevisionInstructions: revisionInstructions };
-		new Notice(translate(this.settings.language, "task.process.queued"));
-
-		try {
-			const result = await this.autoProcessor.enqueueManual(file, binding, ANKI_CARD_GENERATION_TASK_ID, context);
-			this.hideProcessingProgress();
-			if (this.settings.showCompletionNotice) {
-				new Notice(this.getSuccessMessage(result.tokenUsage));
-			}
-		} catch (error) {
-			this.hideProcessingProgress();
-			if (isProcessingCanceled(error)) {
-				new Notice(translate(this.settings.language, "task.queue.canceled"));
-				return;
-			}
-
-			const message = error instanceof Error ? error.message : String(error);
-			new Notice(translate(this.settings.language, "task.process.failure", { message }));
-		}
+		await this.processCurrentTask(file, ANKI_CARD_GENERATION_TASK_ID, context);
 	}
 
 	private async processCurrentNoteFormatting(file: TFile): Promise<void> {
+		await this.processCurrentTask(file, NOTE_FORMATTING_TASK_ID);
+	}
+
+	private async processCurrentTask(file: TFile, taskId: ProcessingTaskId, context?: TaskPrepareContext): Promise<void> {
 		if (!this.autoProcessor) {
 			return;
 		}
 
 		const binding = findTaskBindingForFile(
 			file.path,
-			this.settings.taskBindings.filter((item) => item.taskId === NOTE_FORMATTING_TASK_ID),
+			this.settings.taskBindings.filter((item) => item.taskId === taskId),
 		);
 		new Notice(translate(this.settings.language, "task.process.queued"));
 
 		try {
-			const result = await this.autoProcessor.enqueueManual(file, binding, NOTE_FORMATTING_TASK_ID);
+			const result = await this.autoProcessor.enqueueManual(file, binding, taskId, context);
 			this.hideProcessingProgress();
 			if (this.settings.showCompletionNotice) {
 				new Notice(this.getSuccessMessage(result.tokenUsage));
@@ -536,15 +491,7 @@ export default class DocumentProcessingPlugin extends Plugin {
 	}
 
 	getTaskDisplayName(taskId: ProcessingTaskId): string {
-		if (taskId === ANKI_CARD_GENERATION_TASK_ID) {
-			return translate(this.settings.language, "task.ankiCardGeneration");
-		}
-
-		if (taskId === NOTE_FORMATTING_TASK_ID) {
-			return translate(this.settings.language, "task.noteFormatting");
-		}
-
-		return translate(this.settings.language, "task.webClipperBilingualCleanup");
+		return getTaskDisplayName(this.settings.language, taskId);
 	}
 
 	private addQueueToMessage(message: string): string {
@@ -589,6 +536,6 @@ export default class DocumentProcessingPlugin extends Plugin {
 
 function isProcessingCanceled(error: unknown): boolean {
 	return error instanceof ProcessingCanceledError
-		|| error instanceof DOMException && error.name === "AbortError"
+		|| isAbortError(error)
 		|| error instanceof Error && /canceled|cancelled|aborted/iu.test(error.message);
 }

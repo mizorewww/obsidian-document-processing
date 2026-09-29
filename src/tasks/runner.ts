@@ -1,5 +1,6 @@
 import { App, normalizePath, parseYaml, PluginManifest, stringifyYaml, TFile } from "obsidian";
 import { splitFrontmatter } from "../markdown/frontmatter";
+import { throwIfAborted } from "../llm/abort";
 import { requestLlmText } from "../llm/request";
 import { LlmProgressCallback } from "../llm/token-usage";
 import { DocumentProcessingSettings } from "../settings-data";
@@ -140,9 +141,15 @@ export class TaskRunner {
 	}
 
 	private getCurrentModel(): string {
-		return this.settings.llmProvider === "codex-login"
-			? this.settings.codexModel
-			: this.settings.openaiModel;
+		if (this.settings.llmProvider === "codex-login") {
+			return this.settings.codexModel;
+		}
+
+		if (this.settings.llmProvider === "ollama-cloud") {
+			return this.settings.ollamaModel;
+		}
+
+		return this.settings.openaiModel;
 	}
 
 	private async commitIfUnchanged(file: TFile, originalHash: string, finalMarkdown: string): Promise<void> {
@@ -252,8 +259,3 @@ function createJobId(): string {
 	return `${timestamp}-${suffix}`;
 }
 
-function throwIfAborted(signal: AbortSignal | undefined): void {
-	if (signal?.aborted) {
-		throw new Error("Processing queue canceled.");
-	}
-}

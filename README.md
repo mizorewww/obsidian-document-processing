@@ -7,7 +7,8 @@ An Obsidian plugin for processing notes and documents with configurable model se
 - Use an OpenAI API key.
 - Sign in with an OpenAI account.
 - Use the default OpenAI API endpoint or an OpenAI-compatible custom endpoint.
-- Load available models from the configured API endpoint, select a model, or type a custom model ID.
+- Load available models from the configured API endpoint, check which ones to keep in the model dropdown, or type a custom model ID.
+- Ollama Cloud support through its OpenAI-compatible endpoint.
 - Choose intelligence and speed preferences when using OpenAI account sign-in.
 - Process the current Web Clipper note into cleaner Markdown, using bilingual output only when the source is mostly non-Chinese.
 - Create or update Anki cards in a note's `# Cards` section for the `obsidian_anki_sync` plugin.
@@ -28,11 +29,21 @@ An Obsidian plugin for processing notes and documents with configurable model se
 2. Select **OpenAI API key**.
 3. Enter your OpenAI API key.
 4. Keep the default API endpoint or enter an OpenAI-compatible endpoint.
-5. Select a model from the loaded list or type a custom model ID.
+5. Select the refresh button next to the API endpoint to load models from the endpoint, check the models you want in the picker dialog, then choose one from the model dropdown. You can also type a custom model ID.
 6. Select **Check**.
 
 The API key is stored in this plugin's local Obsidian data.
 Custom endpoints are called through the OpenAI-compatible Chat Completions API.
+
+### Ollama Cloud
+
+1. Open **Settings -> Community plugins -> Document Processing**.
+2. Select **Ollama Cloud**.
+3. Enter your Ollama Cloud API key (create one at https://ollama.com/settings/keys).
+4. Select the refresh button next to the API key to load the available cloud models, check the ones you want, then choose one from the model dropdown.
+5. Select **Check**.
+
+The plugin calls the OpenAI-compatible endpoint `https://ollama.com/v1` with your key. The API key is stored in this plugin's local Obsidian data.
 
 ### OpenAI account
 

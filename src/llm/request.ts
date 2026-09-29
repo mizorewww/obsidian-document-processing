@@ -4,6 +4,7 @@ import {
 	refreshCodexAuth,
 } from "./codex-auth";
 import { CodexRequestError, requestCodexText } from "./codex-client";
+import { OLLAMA_CLOUD_BASE_URL } from "./ollama-cloud";
 import { requestOpenAiText } from "./openai-client";
 import { LlmProgressCallback, LlmTokenUsage } from "./token-usage";
 
@@ -29,24 +30,51 @@ export async function requestLlmText(request: LlmTextRequest): Promise<LlmTextRe
 		return requestCodexLoginText(request);
 	}
 
-	return requestOpenAiApiText(request);
+	if (request.settings.llmProvider === "ollama-cloud") {
+		return requestApiKeyText(request, {
+			apiKey: request.settings.ollamaApiKey,
+			baseUrl: OLLAMA_CLOUD_BASE_URL,
+			model: request.settings.ollamaModel,
+			provider: "ollama-cloud",
+			missingKeyMessage: "Ollama Cloud API key is missing.",
+			missingModelMessage: "Ollama Cloud model is missing.",
+		});
+	}
+
+	return requestApiKeyText(request, {
+		apiKey: request.settings.openaiApiKey,
+		baseUrl: request.settings.openaiBaseUrl,
+		model: request.settings.openaiModel,
+		provider: "openai-api",
+		missingKeyMessage: "OpenAI API key is missing.",
+		missingModelMessage: "OpenAI model is missing.",
+	});
 }
 
-async function requestOpenAiApiText(request: LlmTextRequest): Promise<LlmTextResponse> {
-	const apiKey = request.settings.openaiApiKey.trim();
-	const model = request.settings.openaiModel.trim();
+interface ApiKeyTextConfig {
+	apiKey: string;
+	baseUrl: string;
+	model: string;
+	provider: string;
+	missingKeyMessage: string;
+	missingModelMessage: string;
+}
+
+async function requestApiKeyText(request: LlmTextRequest, config: ApiKeyTextConfig): Promise<LlmTextResponse> {
+	const apiKey = config.apiKey.trim();
+	const model = config.model.trim();
 
 	if (!apiKey) {
-		throw new Error("OpenAI API key is missing.");
+		throw new Error(config.missingKeyMessage);
 	}
 
 	if (!model) {
-		throw new Error("OpenAI model is missing.");
+		throw new Error(config.missingModelMessage);
 	}
 
 	const response = await requestOpenAiText({
 		apiKey,
-		baseUrl: request.settings.openaiBaseUrl,
+		baseUrl: config.baseUrl,
 		model,
 		instructions: request.instructions,
 		prompt: request.prompt,
@@ -57,7 +85,7 @@ async function requestOpenAiApiText(request: LlmTextRequest): Promise<LlmTextRes
 
 	return {
 		text: response.text,
-		provider: "openai-api",
+		provider: config.provider,
 		model,
 		usage: response.usage,
 	};

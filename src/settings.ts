@@ -1,4 +1,4 @@
-import { App, Modal, Notice, PluginSettingTab, Setting } from "obsidian";
+import { App, ExtraButtonComponent, Modal, Notice, PluginSettingTab, Setting } from "obsidian";
 import type DocumentProcessingPlugin from "./main";
 import { translate, LanguageSetting, resolveLanguage } from "./i18n";
 import { checkLlmConnection } from "./llm/check";
@@ -19,12 +19,13 @@ import {
 	CodexServiceTier,
 	getModelOption,
 	ModelOption,
+	OLLAMA_CLOUD_MODELS,
 	OPENAI_API_MODELS,
 } from "./llm/models";
+import { OLLAMA_CLOUD_BASE_URL } from "./llm/ollama-cloud";
 import { AnkiCardLanguage, CodexAuthData, LlmConnectionCheckRecord, LlmProvider } from "./settings-data";
 import { TASK_DEFINITIONS } from "./tasks";
-import { ANKI_CARD_GENERATION_TASK_ID } from "./tasks/anki-card-utils";
-import { NOTE_FORMATTING_TASK_ID } from "./tasks/note-formatting";
+import { getTaskDisplayName } from "./tasks/labels";
 import {
 	createTaskBindingId,
 	DEFAULT_TASK_BINDING_FOLDER,
@@ -32,16 +33,17 @@ import {
 	normalizeVaultFolderPath,
 	TaskBinding,
 } from "./tasks/bindings";
+import { ANKI_CARD_GENERATION_TASK_ID, ProcessingTaskId } from "./tasks/task-ids";
+import { openModelPickerModal } from "./ui/model-picker-modal";
 import { TaskDefinition } from "./tasks/types";
 
 const LANGUAGE_SETTINGS: LanguageSetting[] = ["auto", "zh-CN", "en"];
-const PROVIDERS: LlmProvider[] = ["openai-api", "codex-login"];
+const PROVIDERS: LlmProvider[] = ["openai-api", "codex-login", "ollama-cloud"];
 const ANKI_CARD_LANGUAGES: AnkiCardLanguage[] = ["zh-CN", "en", "match-note"];
 
 export class DocumentProcessingSettingTab extends PluginSettingTab {
 	plugin: DocumentProcessingPlugin;
 	private loginAbortController: AbortController | null = null;
-	private lastOpenAiModelRefreshKey: string | null = null;
 
 	constructor(app: App, plugin: DocumentProcessingPlugin) {
 		super(app, plugin);
@@ -57,7 +59,6 @@ export class DocumentProcessingSettingTab extends PluginSettingTab {
 		this.addModelSection(containerEl);
 		this.addProcessingSection(containerEl);
 		this.addCheckSection(containerEl);
-		this.refreshOpenAiModelsIfNeeded();
 	}
 
 	private addGeneralSection(containerEl: HTMLElement): void {
@@ -103,6 +104,11 @@ export class DocumentProcessingSettingTab extends PluginSettingTab {
 			return;
 		}
 
+		if (this.plugin.settings.llmProvider === "ollama-cloud") {
+			this.addOllamaCloudAccountSection(containerEl);
+			return;
+		}
+
 		this.addCodexAccountSection(containerEl);
 	}
 
@@ -128,6 +134,7 @@ export class DocumentProcessingSettingTab extends PluginSettingTab {
 					});
 			});
 
+		let endpointDraft = this.plugin.settings.openaiBaseUrl;
 		new Setting(sectionEl)
 			.setName(this.t("api.endpoint.name"))
 			.setDesc(this.t("api.endpoint.desc"))
@@ -135,27 +142,72 @@ export class DocumentProcessingSettingTab extends PluginSettingTab {
 				text
 					.setPlaceholder(this.t("api.endpoint.placeholder"))
 					.setValue(this.plugin.settings.openaiBaseUrl)
-					.onChange(async (value) => {
-						this.plugin.settings.openaiBaseUrl = value.trim();
-						this.plugin.settings.openaiAvailableModels = [];
-						await this.plugin.saveSettings();
+					.onChange((value) => {
+						endpointDraft = value;
 					});
-				text.inputEl.addEventListener("blur", () => {
-					try {
-						this.plugin.settings.openaiBaseUrl = normalizeOpenAiBaseUrl(this.plugin.settings.openaiBaseUrl);
-						void this.plugin.saveSettings().then(() => this.refreshOpenAiModels(true));
-					} catch (error) {
-						const message = error instanceof Error ? error.message : this.t("model.refresh.failed");
-						new Notice(message);
-					}
+				text.inputEl.addEventListener("change", () => {
+					void this.commitOpenAiEndpoint(endpointDraft);
 				});
 			})
 			.addExtraButton((button) => button
 				.setIcon("refresh-cw")
 				.setTooltip(this.t("model.refresh.tooltip"))
 				.onClick(() => {
-					void this.refreshOpenAiModels(true);
+					void this.openOpenAiModelPicker(button);
 				}));
+	}
+
+	private async commitOpenAiEndpoint(rawValue: string): Promise<void> {
+		let normalized: string;
+		try {
+			normalized = normalizeOpenAiBaseUrl(rawValue);
+		} catch {
+			new Notice(this.t("api.endpoint.invalid"));
+			this.display();
+			return;
+		}
+
+		if (normalized === this.plugin.settings.openaiBaseUrl) {
+			return;
+		}
+
+		this.plugin.settings.openaiBaseUrl = normalized;
+		this.plugin.settings.openaiAvailableModels = [];
+		await this.plugin.saveSettings();
+		this.display();
+	}
+
+	private addOllamaCloudAccountSection(containerEl: HTMLElement): void {
+		const sectionEl = this.addSection(containerEl, this.t("section.account"));
+		const apiKey = this.plugin.settings.ollamaApiKey.trim();
+
+		new Setting(sectionEl)
+			.setName(this.t("account.status"))
+			.setDesc(apiKey ? this.t("api.keySaved", { key: this.maskApiKey(apiKey) }) : this.t("api.keyMissing"));
+
+		new Setting(sectionEl)
+			.setName(this.t("ollama.key.name"))
+			.setDesc(this.t("ollama.key.desc"))
+			.addText((text) => {
+				text.inputEl.type = "password";
+				text
+					.setPlaceholder(this.t("api.key.placeholder"))
+					.setValue(this.plugin.settings.ollamaApiKey)
+					.onChange(async (value) => {
+						this.plugin.settings.ollamaApiKey = value.trim();
+						await this.plugin.saveSettings();
+					});
+			})
+			.addExtraButton((button) => button
+				.setIcon("refresh-cw")
+				.setTooltip(this.t("model.refresh.tooltip"))
+				.onClick(() => {
+					void this.openOllamaModelPicker(button);
+				}));
+
+		new Setting(sectionEl)
+			.setName(this.t("ollama.endpoint.name"))
+			.setDesc(this.t("ollama.endpoint.desc"));
 	}
 
 	private addCodexAccountSection(containerEl: HTMLElement): void {
@@ -244,15 +296,18 @@ export class DocumentProcessingSettingTab extends PluginSettingTab {
 
 	private addModelSection(containerEl: HTMLElement): void {
 		const sectionEl = this.addSection(containerEl, this.t("section.model"));
-		const options = this.plugin.settings.llmProvider === "codex-login" ? CODEX_MODELS : this.getOpenAiModelOptions();
+		const provider = this.plugin.settings.llmProvider;
+		const options = provider === "codex-login" ? CODEX_MODELS : this.getApiKeyModelOptions(provider);
 
 		this.addModelSetting({
 			containerEl: sectionEl,
 			model: this.getCurrentModel(),
 			options,
 			onChange: async (model) => {
-				if (this.plugin.settings.llmProvider === "codex-login") {
+				if (provider === "codex-login") {
 					this.plugin.settings.codexModel = model;
+				} else if (provider === "ollama-cloud") {
+					this.plugin.settings.ollamaModel = model;
 				} else {
 					this.plugin.settings.openaiModel = model;
 				}
@@ -260,7 +315,7 @@ export class DocumentProcessingSettingTab extends PluginSettingTab {
 			},
 		});
 
-		if (this.plugin.settings.llmProvider === "codex-login") {
+		if (provider === "codex-login") {
 			this.addCodexPerformanceSettings(sectionEl);
 		}
 	}
@@ -296,16 +351,22 @@ export class DocumentProcessingSettingTab extends PluginSettingTab {
 		new Setting(config.containerEl)
 			.setName(this.t("model.custom.name"))
 			.setDesc(this.t("model.custom.desc"))
-			.addText((text) => text
-				.setPlaceholder(this.t("model.custom.placeholder"))
-				.onChange(async (value) => {
-					const model = value.trim();
+			.addText((text) => {
+				let draft = "";
+				text
+					.setPlaceholder(this.t("model.custom.placeholder"))
+					.onChange((value) => {
+						draft = value;
+					});
+				text.inputEl.addEventListener("change", () => {
+					const model = draft.trim();
 					if (!model) {
 						return;
 					}
 
-					await config.onChange(model);
-				}));
+					void config.onChange(model).then(() => this.display());
+				});
+			});
 	}
 
 	private addCodexPerformanceSettings(containerEl: HTMLElement): void {
@@ -612,15 +673,23 @@ export class DocumentProcessingSettingTab extends PluginSettingTab {
 	}
 
 	private getCurrentModel(): string {
-		return this.plugin.settings.llmProvider === "codex-login"
-			? this.plugin.settings.codexModel
-			: this.plugin.settings.openaiModel;
+		if (this.plugin.settings.llmProvider === "codex-login") {
+			return this.plugin.settings.codexModel;
+		}
+
+		if (this.plugin.settings.llmProvider === "ollama-cloud") {
+			return this.plugin.settings.ollamaModel;
+		}
+
+		return this.plugin.settings.openaiModel;
 	}
 
-	private getOpenAiModelOptions(): ModelOption[] {
-		const remoteModels = this.plugin.settings.openaiAvailableModels;
+	private getApiKeyModelOptions(provider: "openai-api" | "ollama-cloud"): ModelOption[] {
+		const remoteModels = provider === "openai-api"
+			? this.plugin.settings.openaiAvailableModels
+			: this.plugin.settings.ollamaAvailableModels;
 		if (!remoteModels.length) {
-			return OPENAI_API_MODELS;
+			return provider === "openai-api" ? OPENAI_API_MODELS : OLLAMA_CLOUD_MODELS;
 		}
 
 		return remoteModels.map((id) => ({
@@ -635,54 +704,98 @@ export class DocumentProcessingSettingTab extends PluginSettingTab {
 			return this.t("model.desc");
 		}
 
-		const count = this.plugin.settings.openaiAvailableModels.length;
+		const count = this.plugin.settings.llmProvider === "ollama-cloud"
+			? this.plugin.settings.ollamaAvailableModels.length
+			: this.plugin.settings.openaiAvailableModels.length;
 		return count ? this.t("model.remote.desc", { count }) : this.t("model.desc");
 	}
 
-	private refreshOpenAiModelsIfNeeded(): void {
-		const refreshKey = this.getOpenAiModelRefreshKey();
-		if (
-			this.plugin.settings.llmProvider !== "openai-api"
-			|| !this.plugin.settings.openaiApiKey.trim()
-			|| this.plugin.settings.openaiAvailableModels.length
-			|| this.lastOpenAiModelRefreshKey === refreshKey
-		) {
-			return;
-		}
-
-		void this.refreshOpenAiModels(false);
+	private async openOpenAiModelPicker(button: ExtraButtonComponent): Promise<void> {
+		await this.openApiKeyModelPicker(button, "openai-api");
 	}
 
-	private async refreshOpenAiModels(showNotice: boolean): Promise<void> {
-		const apiKey = this.plugin.settings.openaiApiKey.trim();
-		if (this.plugin.settings.llmProvider !== "openai-api" || !apiKey) {
-			if (showNotice) {
-				new Notice(this.t("check.error.missingApiKey"));
-			}
+	private async openOllamaModelPicker(button: ExtraButtonComponent): Promise<void> {
+		await this.openApiKeyModelPicker(button, "ollama-cloud");
+	}
+
+	private async openApiKeyModelPicker(button: ExtraButtonComponent, provider: "openai-api" | "ollama-cloud"): Promise<void> {
+		const apiKey = this.getApiKeyProviderApiKey(provider);
+		if (this.plugin.settings.llmProvider !== provider || !apiKey) {
+			new Notice(this.t(provider === "openai-api" ? "check.error.missingApiKey" : "check.error.missingOllamaKey"));
 			return;
 		}
 
+		button.setDisabled(true);
 		try {
-			this.lastOpenAiModelRefreshKey = this.getOpenAiModelRefreshKey();
-			const models = await fetchOpenAiModels(apiKey, this.plugin.settings.openaiBaseUrl);
-			this.plugin.settings.openaiBaseUrl = normalizeOpenAiBaseUrl(this.plugin.settings.openaiBaseUrl);
-			this.plugin.settings.openaiAvailableModels = models;
-			await this.plugin.saveSettings();
-			if (showNotice) {
-				new Notice(this.t("model.refresh.done", { count: models.length }));
+			const baseUrl = this.getApiKeyProviderBaseUrl(provider);
+			const models = await fetchOpenAiModels(apiKey, baseUrl);
+			if (provider === "openai-api") {
+				this.plugin.settings.openaiBaseUrl = baseUrl;
 			}
+			if (models.length === 0) {
+				await this.plugin.saveSettings();
+				new Notice(this.t("model.refresh.done", { count: 0 }));
+				this.display();
+				return;
+			}
+
+			const chosen = await openModelPickerModal(this.app, {
+				title: this.t("model.picker.title"),
+				description: this.t("model.picker.desc", { endpoint: baseUrl, count: models.length }),
+				searchPlaceholder: this.t("model.picker.searchPlaceholder"),
+				emptyText: this.t("model.picker.empty"),
+				saveText: this.t("model.picker.save"),
+				cancelText: this.t("model.picker.cancel"),
+				models,
+				initiallySelected: this.getInitialModelPickerSelection(provider, models),
+			});
+			if (chosen === null) {
+				return;
+			}
+
+			if (provider === "openai-api") {
+				this.plugin.settings.openaiAvailableModels = chosen;
+			} else {
+				this.plugin.settings.ollamaAvailableModels = chosen;
+			}
+			await this.plugin.saveSettings();
+			new Notice(this.t("model.refresh.done", { count: chosen.length }));
 			this.display();
 		} catch (error) {
 			console.error("Document Processing model refresh failed", error);
-			if (showNotice) {
-				const message = error instanceof Error ? error.message : this.t("model.refresh.failed");
-				new Notice(message);
-			}
+			const message = error instanceof Error ? error.message : this.t("model.refresh.failed");
+			new Notice(message);
+		} finally {
+			button.setDisabled(false);
 		}
 	}
 
-	private getOpenAiModelRefreshKey(): string {
-		return `${this.plugin.settings.openaiBaseUrl.trim()}::${this.plugin.settings.openaiApiKey.trim()}`;
+	private getApiKeyProviderApiKey(provider: "openai-api" | "ollama-cloud"): string {
+		return provider === "openai-api"
+			? this.plugin.settings.openaiApiKey.trim()
+			: this.plugin.settings.ollamaApiKey.trim();
+	}
+
+	private getApiKeyProviderBaseUrl(provider: "openai-api" | "ollama-cloud"): string {
+		return provider === "openai-api"
+			? normalizeOpenAiBaseUrl(this.plugin.settings.openaiBaseUrl)
+			: OLLAMA_CLOUD_BASE_URL;
+	}
+
+	private getInitialModelPickerSelection(provider: "openai-api" | "ollama-cloud", models: string[]): string[] {
+		const available = new Set(models);
+		const saved = provider === "openai-api"
+			? this.plugin.settings.openaiAvailableModels
+			: this.plugin.settings.ollamaAvailableModels;
+		const currentModel = provider === "openai-api"
+			? this.plugin.settings.openaiModel
+			: this.plugin.settings.ollamaModel;
+		const selected = saved.filter((model) => available.has(model));
+		if (selected.length === 0 && available.has(currentModel)) {
+			selected.push(currentModel);
+		}
+
+		return selected;
 	}
 
 	private getLastCheckSummary(): string {
@@ -763,23 +876,15 @@ export class DocumentProcessingSettingTab extends PluginSettingTab {
 			return this.t("provider.openaiApi");
 		}
 
+		if (provider === "ollama-cloud") {
+			return this.t("provider.ollamaCloud");
+		}
+
 		return this.t("provider.codexLogin");
 	}
 
-	private getTaskLabel(taskId: string): string {
-		if (taskId === "web-clipper-bilingual-cleanup") {
-			return this.t("task.webClipperBilingualCleanup");
-		}
-
-		if (taskId === NOTE_FORMATTING_TASK_ID) {
-			return this.t("task.noteFormatting");
-		}
-
-		if (taskId === "anki-card-generation") {
-			return this.t("task.ankiCardGeneration");
-		}
-
-		return taskId;
+	private getTaskLabel(taskId: ProcessingTaskId): string {
+		return getTaskDisplayName(this.plugin.settings.language, taskId);
 	}
 
 	private getAnkiCardLanguageLabel(language: AnkiCardLanguage): string {

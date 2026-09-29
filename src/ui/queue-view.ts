@@ -9,7 +9,6 @@ export const PROCESSING_QUEUE_VIEW_TYPE = "document-processing-queue";
 
 export class ProcessingQueueView extends ItemView {
 	private plugin: DocumentProcessingPlugin;
-	private refreshTimer: number | null = null;
 
 	constructor(leaf: WorkspaceLeaf, plugin: DocumentProcessingPlugin) {
 		super(leaf);
@@ -30,16 +29,9 @@ export class ProcessingQueueView extends ItemView {
 
 	async onOpen(): Promise<void> {
 		this.render();
-		this.refreshTimer = window.setInterval(() => {
+		this.registerInterval(window.setInterval(() => {
 			this.render();
-		}, 1000);
-	}
-
-	async onClose(): Promise<void> {
-		if (this.refreshTimer !== null) {
-			window.clearInterval(this.refreshTimer);
-			this.refreshTimer = null;
-		}
+		}, 1000));
 	}
 
 	render(): void {

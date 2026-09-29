@@ -1,7 +1,7 @@
 import { buildMarkdownWithFrontmatter } from "../markdown/frontmatter";
 import { ANKI_REFERENCE_PROMPT_FILES } from "./anki-reference-prompts";
+import { ANKI_CARD_GENERATION_TASK_ID } from "./task-ids";
 import {
-	ANKI_CARD_GENERATION_TASK_ID,
 	buildAnkiCardPrompt,
 	DEFAULT_ANKI_CARD_PROMPT,
 	extractAnkiCardUuids,

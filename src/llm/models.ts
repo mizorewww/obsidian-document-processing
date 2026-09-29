@@ -129,6 +129,64 @@ export const CODEX_MODELS: ModelOption[] = [
 	},
 ];
 
+export const OLLAMA_CLOUD_MODELS: ModelOption[] = [
+	{
+		id: "gpt-oss:120b",
+		name: "GPT-OSS 120B",
+		description: "Strong general-purpose cloud model.",
+	},
+	{
+		id: "gpt-oss:20b",
+		name: "GPT-OSS 20B",
+		description: "Faster, lower-cost cloud model.",
+	},
+	{
+		id: "deepseek-v4-flash:0731",
+		name: "DeepSeek V4 Flash",
+		description: "Fast cloud model for everyday tasks.",
+	},
+	{
+		id: "deepseek-v4-pro:0813",
+		name: "DeepSeek V4 Pro",
+		description: "Strong reasoning cloud model.",
+	},
+	{
+		id: "qwen3.5:397b",
+		name: "Qwen 3.5 397B",
+		description: "Large multilingual cloud model.",
+	},
+	{
+		id: "kimi-k2.6",
+		name: "Kimi K2.6",
+		description: "General-purpose cloud model.",
+	},
+	{
+		id: "glm-5.2",
+		name: "GLM 5.2",
+		description: "Balanced cloud model.",
+	},
+	{
+		id: "minimax-m3",
+		name: "MiniMax M3",
+		description: "Fast cloud model.",
+	},
+	{
+		id: "gemma4:31b",
+		name: "Gemma 4 31B",
+		description: "Efficient cloud model.",
+	},
+	{
+		id: "mistral-large-3:675b",
+		name: "Mistral Large 3 675B",
+		description: "Large European cloud model.",
+	},
+	{
+		id: "nemotron-3-ultra",
+		name: "Nemotron 3 Ultra",
+		description: "High-capability cloud model.",
+	},
+];
+
 export function getModelOption(options: ModelOption[], modelId: string): ModelOption | undefined {
 	return options.find((option) => option.id === modelId);
 }
