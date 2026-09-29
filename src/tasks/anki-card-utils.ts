@@ -1,5 +1,6 @@
 import { TaskReference } from "./types";
 import type { AnkiCardLanguage } from "../settings-data";
+import { parseLlmJsonObject, normalizeChangeSummary } from "./llm-output";
 
 export interface AnkiCardLlmResult {
 	cardsMarkdown: string;
@@ -29,8 +30,6 @@ export interface ParseAnkiCardLlmResultOptions {
 	existingUuids: Set<string>;
 }
 
-export const ANKI_CARD_GENERATION_TASK_ID = "anki-card-generation";
-
 export const DEFAULT_ANKI_CARD_PROMPT = [
 	"You create and maintain Anki cards inside Obsidian Markdown notes.",
 	"Use the supplied Anki Sync rules, card-writing guide, examples, and output contract.",
@@ -44,9 +43,11 @@ export const DEFAULT_ANKI_CARD_PROMPT = [
 	"Never write a non-empty path line. If an existing card has path, remove it or leave path blank. The Anki Sync plugin owns path.",
 ].join("\n");
 
-const CARDS_HEADING_PATTERN = /^#{1,6}\s+Cards\s*$/imu;
+const CARDS_HEADING_PATTERN = /^(#{1,6})\s+Cards\s*$/iu;
+const HEADING_LINE_PATTERN = /^(#{1,6})\s/u;
 const BLOCK_SEPARATOR_PATTERN = /^\s*---\s*$/u;
 const METADATA_LINE_PATTERN = /^\s*(type|tag|tags|uuid|path)\s*:\s*(.*?)\s*$/iu;
+const FENCE_LINE_PATTERN = /^\s*(```|~~~)/u;
 const CLOZE_PATTERN = /\{\{c\d+::[\s\S]*?\}\}/iu;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const BASIC_TYPES = new Set([
@@ -136,7 +137,7 @@ export function normalizeAnkiCardLanguage(value: unknown): AnkiCardLanguage {
 }
 
 export function parseAnkiCardLlmResult(rawText: string, options: ParseAnkiCardLlmResultOptions): AnkiCardLlmResult {
-	const payload = parseJsonObject(rawText) as {
+	const payload = parseLlmJsonObject(rawText) as {
 		cardsMarkdown?: unknown;
 		changeSummary?: unknown;
 	};
@@ -159,31 +160,71 @@ export function replaceOrAppendAnkiCardsSection(body: string, cardsMarkdown: str
 	const normalizedCards = normalizeCardsMarkdown(cardsMarkdown);
 	const normalizedBody = body.replace(/\r\n?/gu, "\n");
 	const section = findAnkiCardsSection(normalizedBody);
-	const before = section ? normalizedBody.slice(0, section.startOffset).trimEnd() : normalizedBody.trimEnd();
 
-	if (!before) {
-		return `${normalizedCards}\n`;
+	if (!section) {
+		const before = normalizedBody.trimEnd();
+		return before ? `${before}\n\n${normalizedCards}\n` : `${normalizedCards}\n`;
 	}
 
-	return `${before}\n\n${normalizedCards}\n`;
+	const before = normalizedBody.slice(0, section.startOffset).trimEnd();
+	const after = normalizedBody.slice(section.endOffset).trim();
+	const parts = [before, normalizedCards, after].filter((part) => part.length > 0);
+	return `${parts.join("\n\n")}\n`;
 }
 
 export function findAnkiCardsSection(markdown: string): AnkiCardsSection | null {
 	const normalized = markdown.replace(/\r\n?/gu, "\n");
-	const match = CARDS_HEADING_PATTERN.exec(normalized);
-	if (!match || match.index === undefined) {
-		return null;
+	const lines = normalized.split("\n");
+	let offset = 0;
+	let inFence = false;
+
+	for (let index = 0; index < lines.length; index += 1) {
+		const line = lines[index] ?? "";
+		const lineStart = offset;
+		offset += line.length + 1;
+
+		if (FENCE_LINE_PATTERN.test(line)) {
+			inFence = !inFence;
+			continue;
+		}
+		if (inFence) continue;
+
+		const headingMatch = line.match(CARDS_HEADING_PATTERN);
+		if (!headingMatch) continue;
+
+		const headingLevel = headingMatch[1]?.length ?? 1;
+		const endOffset = findCardsSectionEnd(lines, index + 1, headingLevel, offset, normalized.length);
+		return {
+			startOffset: lineStart,
+			contentStartOffset: Math.min(lineStart + line.length + 1, normalized.length),
+			endOffset,
+			sectionMarkdown: normalized.slice(lineStart, endOffset).trim(),
+		};
 	}
 
-	const headingEnd = normalized.indexOf("\n", match.index);
-	const contentStartOffset = headingEnd >= 0 ? headingEnd + 1 : normalized.length;
+	return null;
+}
 
-	return {
-		startOffset: match.index,
-		contentStartOffset,
-		endOffset: normalized.length,
-		sectionMarkdown: normalized.slice(match.index).trim(),
-	};
+function findCardsSectionEnd(lines: string[], fromIndex: number, headingLevel: number, fromOffset: number, fallback: number): number {
+	let offset = fromOffset;
+	let inFence = false;
+
+	for (let index = fromIndex; index < lines.length; index += 1) {
+		const line = lines[index] ?? "";
+
+		if (FENCE_LINE_PATTERN.test(line)) {
+			inFence = !inFence;
+		} else if (!inFence) {
+			const level = line.match(HEADING_LINE_PATTERN)?.[1]?.length;
+			if (level !== undefined && level <= headingLevel) {
+				return offset;
+			}
+		}
+
+		offset += line.length + 1;
+	}
+
+	return fallback;
 }
 
 export function extractAnkiCardUuids(cardsMarkdown: string): string[] {
@@ -270,8 +311,17 @@ function validateIdentityLines(blocks: string[], existingUuids: Set<string>): vo
 
 function sanitizeIdentityLines(cardsMarkdown: string, existingUuids: Set<string>): string {
 	const outputUuids = new Set<string>();
+	let inFence = false;
 
 	return cardsMarkdown.split("\n").map((line) => {
+		if (FENCE_LINE_PATTERN.test(line)) {
+			inFence = !inFence;
+			return line;
+		}
+		if (inFence) {
+			return line;
+		}
+
 		const metadata = line.match(METADATA_LINE_PATTERN);
 		if (!metadata) {
 			return line;
@@ -323,9 +373,12 @@ function splitAnkiCardBlocks(cardsMarkdown: string): string[] {
 	const contentLines = lines.slice(1);
 	const blocks: string[] = [];
 	let current: string[] = [];
+	let inFence = false;
 
 	for (const line of contentLines) {
-		if (BLOCK_SEPARATOR_PATTERN.test(line)) {
+		if (FENCE_LINE_PATTERN.test(line)) {
+			inFence = !inFence;
+		} else if (!inFence && BLOCK_SEPARATOR_PATTERN.test(line)) {
 			blocks.push(current.join("\n"));
 			current = [];
 			continue;
@@ -363,12 +416,34 @@ function getCardType(block: string): string | null {
 }
 
 function hasFrontBackMarkers(block: string): boolean {
-	return /^\s*Front\s*$/imu.test(block) || /^\s*Back\s*$/imu.test(block);
+	let inFence = false;
+
+	for (const line of block.split("\n")) {
+		if (FENCE_LINE_PATTERN.test(line)) {
+			inFence = !inFence;
+			continue;
+		}
+		if (!inFence && /^\s*(Front|Back)\s*$/iu.test(line)) {
+			return true;
+		}
+	}
+
+	return false;
 }
 
 function extractMetadataLines(markdown: string): Array<{ key: string; value: string }> {
 	const metadata: Array<{ key: string; value: string }> = [];
+	let inFence = false;
+
 	for (const line of markdown.split("\n")) {
+		if (FENCE_LINE_PATTERN.test(line)) {
+			inFence = !inFence;
+			continue;
+		}
+		if (inFence) {
+			continue;
+		}
+
 		const match = line.match(METADATA_LINE_PATTERN);
 		if (!match) {
 			continue;
@@ -381,20 +456,6 @@ function extractMetadataLines(markdown: string): Array<{ key: string; value: str
 	}
 
 	return metadata;
-}
-
-function normalizeChangeSummary(value: unknown): string[] {
-	if (typeof value === "string" && value.trim()) {
-		return [value.trim()];
-	}
-
-	if (!Array.isArray(value)) {
-		return [];
-	}
-
-	return value
-		.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
-		.map((item) => item.trim());
 }
 
 function formatReferences(references: TaskReference[]): string {
@@ -437,24 +498,3 @@ function getCardLanguageInstruction(language: AnkiCardLanguage): string {
 	].join("\n");
 }
 
-function parseJsonObject(rawText: string): unknown {
-	const trimmed = rawText.trim();
-	const unwrapped = unwrapCodeFence(trimmed);
-
-	try {
-		return JSON.parse(unwrapped);
-	} catch {
-		const start = unwrapped.indexOf("{");
-		const end = unwrapped.lastIndexOf("}");
-		if (start < 0 || end <= start) {
-			throw new Error("LLM output is not valid JSON.");
-		}
-
-		return JSON.parse(unwrapped.slice(start, end + 1));
-	}
-}
-
-function unwrapCodeFence(value: string): string {
-	const fenceMatch = /^```(?:json)?\s*([\s\S]*?)\s*```$/iu.exec(value);
-	return fenceMatch?.[1] ?? value;
-}

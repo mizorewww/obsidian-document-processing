@@ -12,6 +12,7 @@ Hard format rules:
 - Never write a non-empty `path:` line. The Anki Sync plugin writes and updates paths.
 - Existing cards may already contain `path: some/file.md`; do not copy that value into the output. Remove the line or write `path:` with no value.
 - Use Markdown, LaTeX, and code fences normally; do not write HTML.
+- Write LaTeX only with `$...$` (inline) and `$$...$$` (display) delimiters. Never use `\(...\)` or `\[...\]` — the card renderers do not support them.
 - A card may include `tag:` or `tags:` with short, useful tags.
 
 Supported card shapes:

@@ -193,3 +193,104 @@ test("appends a # Cards section when none exists", () => {
 		"",
 	].join("\n"));
 });
+
+test("preserves note content after the cards section when replacing cards", () => {
+	const body = [
+		"# Note",
+		"",
+		"Some text.",
+		"",
+		"# Cards",
+		"",
+		"## Old card",
+		"{{c1::old}}",
+		"",
+		"# References",
+		"",
+		"Keep this section.",
+		"",
+	].join("\n");
+	const cardsMarkdown = "# Cards\n\n## New card\n{{c1::new}}\n";
+
+	const result = replaceOrAppendAnkiCardsSection(body, cardsMarkdown);
+
+	assert.match(result, /# Cards\n\n## New card\n\{\{c1::new\}\}/u);
+	assert.match(result, /# References\n\nKeep this section\.\n?$/u);
+	assert.ok(!result.includes("{{c1::old}}"));
+	assert.ok(result.indexOf("## New card") < result.indexOf("# References"));
+});
+
+test("ignores a cards heading inside a code fence", () => {
+	const body = [
+		"# Format documentation",
+		"",
+		"```markdown",
+		"# Cards",
+		"example content",
+		"```",
+		"",
+	].join("\n");
+	const cardsMarkdown = "# Cards\n\n## New card\n{{c1::new}}\n";
+
+	const result = replaceOrAppendAnkiCardsSection(body, cardsMarkdown);
+
+	assert.ok(result.startsWith("# Format documentation"));
+	assert.match(result, /```\n\n# Cards\n\n## New card/u);
+});
+
+test("keeps metadata-looking lines inside card code fences", () => {
+	const raw = JSON.stringify({
+		cardsMarkdown: [
+			"# Cards",
+			"",
+			"Front",
+			"",
+			"## Config example",
+			"",
+			"```yaml",
+			"path: /usr/bin",
+			"uuid: abc123",
+			"```",
+			"",
+			"Back",
+			"",
+			"answer",
+			"---",
+			"",
+		].join("\n"),
+		changeSummary: [],
+	});
+
+	const result = parseAnkiCardLlmResult(raw, { existingUuids: new Set() });
+
+	assert.match(result.cardsMarkdown, /path: \/usr\/bin/u);
+	assert.match(result.cardsMarkdown, /uuid: abc123/u);
+});
+
+test("does not split cards on a separator inside a code fence", () => {
+	const raw = JSON.stringify({
+		cardsMarkdown: [
+			"# Cards",
+			"",
+			"Front",
+			"",
+			"## Yaml example",
+			"",
+			"```yaml",
+			"---",
+			"key: value",
+			"```",
+			"",
+			"Back",
+			"",
+			"answer",
+			"---",
+			"",
+		].join("\n"),
+		changeSummary: [],
+	});
+
+	const result = parseAnkiCardLlmResult(raw, { existingUuids: new Set() });
+
+	assert.match(result.cardsMarkdown, /```yaml\n---\nkey: value\n```/u);
+});
